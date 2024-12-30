@@ -113,11 +113,9 @@ def get_cifar_transforms(args):
     ])
 
     transform_strong = transforms.Compose([
-        transforms.Resize(crop_size),
-        transforms.RandomCrop(crop_size, padding=int(crop_size * (1 - crop_ratio)), padding_mode='reflect'),
-        transforms.RandomHorizontalFlip(),
-        RandAugment(3, 5),
-        transforms.ToTensor(),
+        RandomPadandCrop(crop_size),
+        RandomFlip(),
+        ToTensor(),
         transforms.Normalize(mean[args.dataset], std[args.dataset])
     ])
 

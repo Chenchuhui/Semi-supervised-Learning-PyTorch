@@ -59,6 +59,7 @@ parser.add_argument('--out', default='result',
 parser.add_argument('--alpha', default=0.75, type=float)
 parser.add_argument('--lambda-u', default=75, type=float)
 parser.add_argument('--lambda-kl', default=0.5, type=float)
+parser.add_argument('--lambda-rot', default=0.5, type=float)
 parser.add_argument('--T', default=0.5, type=float)
 parser.add_argument('--ema-decay', default=0.999, type=float)
 
@@ -76,7 +77,6 @@ if args.manualSeed is None:
 np.random.seed(args.manualSeed)
 
 best_acc = 0  # best test accuracy
-rotate_v_list = [0, 90, 180, 270]
 
 def main():
     global best_acc
@@ -241,6 +241,7 @@ def train(labeled_trainloader, unlabeled_trainloader, model, optimizer, ema_opti
             inputs_u2 = inputs_u2.cuda()
             inputs_u3 = inputs_u3.cuda()
             rotate_u = rotate_u.cuda()
+            rot_v = rot_v.cuda()
 
 
         with torch.no_grad():
@@ -297,7 +298,8 @@ def train(labeled_trainloader, unlabeled_trainloader, model, optimizer, ema_opti
                 # Modify the last layer of the model
                 logits_rot = model(rotate_u, True)
                 print(logits_rot)
-            rot_loss = F.cross_entropy(logits_rot, rotate_v_list.index(rot_v), reduction='mean')
+            print(rot_v)
+            rot_loss = F.cross_entropy(logits_rot, rot_v, reduction='mean')
             rot_loss = rot_loss.mean()
             loss += args.lambda_rot * rot_loss
         
