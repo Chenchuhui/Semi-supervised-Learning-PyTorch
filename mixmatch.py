@@ -87,8 +87,8 @@ def main():
     print(f'==> Preparing cifar10')
 
     labeled_set, unlabeled_set, val_set, test_set = dataset.get_cifar(args, 'mixmatch', args.dataset, args.n_labeled, args.num_classes, preload=args.preload)
-    labeled_trainloader = data.DataLoader(labeled_set, batch_size=args.batch_size, shuffle=True, num_workers=0, drop_last=True)
-    unlabeled_trainloader = data.DataLoader(unlabeled_set, batch_size=args.batch_size, shuffle=True, num_workers=0, drop_last=True)
+    labeled_trainloader = data.DataLoader(labeled_set, batch_size=args.batch_size, shuffle=False, num_workers=0, drop_last=True)
+    unlabeled_trainloader = data.DataLoader(unlabeled_set, batch_size=args.batch_size, shuffle=False, num_workers=0, drop_last=True)
     val_loader = data.DataLoader(val_set, batch_size=args.batch_size, shuffle=False, num_workers=0)
     test_loader = data.DataLoader(test_set, batch_size=args.batch_size, shuffle=False, num_workers=0)
 

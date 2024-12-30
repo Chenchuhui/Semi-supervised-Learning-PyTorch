@@ -44,9 +44,7 @@ class NetworkBlock(nn.Module):
         return self.layer(x)
 
 class WideResNet(nn.Module):
-    def __init__(self, num_classes, depth=28, widen_factor=2, dropRate=0.0, rotate=False):
-        if rotate:
-            num_classes = 4
+    def __init__(self, num_classes, depth=28, widen_factor=2, dropRate=0.0, use_rot=False):
         super(WideResNet, self).__init__()
         nChannels = [16, 16*widen_factor, 32*widen_factor, 64*widen_factor]
         assert((depth - 4) % 6 == 0)
@@ -77,8 +75,10 @@ class WideResNet(nn.Module):
             elif isinstance(m, nn.Linear):
                 nn.init.xavier_normal_(m.weight.data)
                 m.bias.data.zero_()
-
-    def forward(self, x):
+        if use_rot:
+            self.rot_classifier = nn.Linear(nChannels[3], 4)
+    
+    def forward(self, x, use_rot=False):
         out = self.conv1(x)
         out = self.block1(out)
         out = self.block2(out)
@@ -86,4 +86,7 @@ class WideResNet(nn.Module):
         out = self.relu(self.bn1(out))
         out = F.avg_pool2d(out, 8)
         out = out.view(-1, self.nChannels)
-        return self.fc(out)
+        if not use_rot:
+            return self.fc(out)
+        else:
+            return self.rot_classifier(out)

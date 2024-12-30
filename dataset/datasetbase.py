@@ -22,9 +22,11 @@ class PreloadBasicDataset(Dataset):
 
     def __init__(self,
                  alg,
-                 w_data,
+                 w_data1,
+                 w_data2=None,
                  m_data=None,
-                 s_data=None,
+                 s_data1=None,
+                 s_data2=None,
                  targets=None,
                  transform=None,
                  num_classes=None,
@@ -44,9 +46,11 @@ class PreloadBasicDataset(Dataset):
         """
         super(PreloadBasicDataset, self).__init__()
         self.alg = alg
-        self.w_data = w_data
+        self.w_data1 = w_data1
+        self.w_data2 = w_data2
         self.m_data = m_data
-        self.s_data = s_data
+        self.s_data1 = s_data1
+        self.s_data2 = s_data2
         self.targets = targets
         self.transform = transform
 
@@ -64,10 +68,12 @@ class PreloadBasicDataset(Dataset):
             target = target_ if not self.onehot else get_onehot(self.num_classes, target_)
 
         # set augmented images
-        img_w = self.w_data[idx]
-        img_m = self.m_data[idx]
-        img_s = self.s_data[idx]
-        return img_w, img_m, img_s, target
+        img_w1 = self.w_data1[idx] if self.w_data1 is not None else None
+        img_w2 = self.w_data2[idx] if self.w_data2 is not None else None
+        img_m = self.m_data[idx] if self.m_data is not None else None
+        img_s1 = self.s_data1[idx] if self.s_data1 is not None else None
+        img_s2 = self.s_data2[idx] if self.s_data2 is not None else None
+        return img_w1, img_w2, img_m, img_s1, img_s2, target
 
     def __getitem__(self, idx):
         """
@@ -76,15 +82,14 @@ class PreloadBasicDataset(Dataset):
         else:
             return weak_augment_image, strong_augment_image, target
         """
-        img_w, img_m, img_s, target = self.__sample__(idx)
-        if img_w is not None:
-            img_w = self.transform(img_w)
-        if img_m is not None:
-            img_m = self.transform(img_m)
-        if img_s is not None:
-            img_s = self.transform(img_s)
+        img_w1, img_w2, img_m, img_s1, img_s2, target = self.__sample__(idx)
+        img_w1 = self.transform(img_w1) if img_w1 is not None else None
+        img_w2 = self.transform(img_w2) if img_w2 is not None else None
+        img_m = self.transform(img_m) if img_m is not None else None
+        img_s1 = self.transform(img_s1) if img_s1 is not None else None
+        img_s2 = self.transform(img_s2) if img_s2 is not None else None
         if not self.is_ulb:
-            return {'x_lb': img_w, 'y_lb': target} 
+            return {'x_lb': img_w1, 'y_lb': target} 
         else:
             if self.alg == 'fullysupervised' or self.alg == 'supervised':
                 return {'idx_ulb': idx}
@@ -92,15 +97,15 @@ class PreloadBasicDataset(Dataset):
                 return {'idx_ulb': idx, 'x_ulb_w':img_w} 
             elif self.alg == 'pimodel' or self.alg == 'meanteacher' or self.alg == 'mixmatch':
                 # NOTE x_ulb_s here is weak augmentation
-                return {'idx_ulb': idx, 'x_ulb_w': img_w, 'x_ulb_s': img_w}
+                return {'idx_ulb': idx, 'x_ulb_w': img_w1, 'x_ulb_s': img_w2}
             # elif self.alg == 'sequencematch' or self.alg == 'somematch':
             elif self.alg == 'sequencematch':
                 return {'idx_ulb': idx, 'x_ulb_w': img_w, 'x_ulb_m': self.medium_transform(img), 'x_ulb_s': self.strong_transform(img)} 
             elif self.alg == 'remixmatch':
                 rotate_v_list = [0, 90, 180, 270]
                 rotate_v1 = np.random.choice(rotate_v_list, 1).item()
-                img_s1_rot = torchvision.transforms.functional.rotate(img_s, rotate_v1)
-                return {'idx_ulb': idx, 'x_ulb_w': img_w, 'x_ulb_s_0': img_s, 'x_ulb_s_1':img_s, 'x_ulb_s_0_rot':img_s1_rot, 'rot_v':rotate_v_list.index(rotate_v1)}
+                img_s1_rot = torchvision.transforms.functional.rotate(img_s1, rotate_v1)
+                return {'idx_ulb': idx, 'x_ulb_w': img_w1, 'x_ulb_s_0': img_s1, 'x_ulb_s_1':img_s2, 'x_ulb_s_0_rot':img_s1_rot, 'rot_v':rotate_v_list.index(rotate_v1)}
             elif self.alg == 'comatch':
                 return {'idx_ulb': idx, 'x_ulb_w': img_w, 'x_ulb_s_0': self.strong_transform(img), 'x_ulb_s_1':self.strong_transform(img)} 
             else:
@@ -108,7 +113,7 @@ class PreloadBasicDataset(Dataset):
 
 
     def __len__(self):
-        return len(self.w_data)
+        return len(self.w_data1)
 
 class BasicDataset(Dataset):
     """
@@ -185,8 +190,8 @@ class BasicDataset(Dataset):
         if self.transform is None:
             return  {'x_lb':  transforms.ToTensor()(img), 'y_lb': target}
         else:
-            if isinstance(img, np.ndarray):
-                img = Image.fromarray(img)
+            # if isinstance(img, np.ndarray):
+            #     img = Image.fromarray(img)
             img_w = self.transform(img)
             if not self.is_ulb:
                 return {'idx_lb': idx, 'x_lb': img_w, 'y_lb': target} 

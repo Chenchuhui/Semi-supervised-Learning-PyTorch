@@ -96,8 +96,8 @@ def main():
     # Model
     print("==> creating WRN-28-2")
 
-    def create_model(ema=False, rotate=False):
-        model = models.WideResNet(num_classes=10, rotate=rotate)
+    def create_model(ema=False, rotate=True):
+        model = models.WideResNet(num_classes=10, use_rot=rotate)
         model = model.cuda()
 
         if ema:
@@ -292,14 +292,14 @@ def train(labeled_trainloader, unlabeled_trainloader, model, optimizer, ema_opti
         loss += args.lambda_kl * u1_loss
 
         # Rotation Loss
-        # if args.lambda_rot > 0:
-        #     with torch.no_grad():
-        #         # Modify the last layer of the model
-        #         logits_rot = model(rotate_u)
-        #         print(logits_rot)
-        #     rot_loss = F.cross_entropy(logits_rot, rotate_v_list.index(rot_v), reduction='mean')
-        #     rot_loss = rot_loss.mean()
-        #     loss += args.lambda_rot * rot_loss
+        if args.lambda_rot > 0:
+            with torch.no_grad():
+                # Modify the last layer of the model
+                logits_rot = model(rotate_u, True)
+                print(logits_rot)
+            rot_loss = F.cross_entropy(logits_rot, rotate_v_list.index(rot_v), reduction='mean')
+            rot_loss = rot_loss.mean()
+            loss += args.lambda_rot * rot_loss
         
         # record loss
         losses.update(loss.item(), inputs_x.size(0))
