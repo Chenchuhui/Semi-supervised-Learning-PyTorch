@@ -92,6 +92,39 @@ def train_val_split(labels, n_labeled_per_class):
 
     return train_labeled_idxs, train_unlabeled_idxs, val_idxs
 
+def preprocess_cifar_transforms(args):
+    crop_size = args.img_size
+    crop_ratio = args.crop_ratio
+
+    transform_weak = transforms.Compose([
+        transforms.Resize(crop_size),
+        transforms.RandomCrop(crop_size, padding=int(crop_size * (1 - crop_ratio)), padding_mode='reflect'),
+        transforms.RandomHorizontalFlip(),
+        transforms.ToTensor(),
+    ])
+
+    transform_medium = transforms.Compose([
+        transforms.Resize(crop_size),
+        transforms.RandomCrop(crop_size, padding=int(crop_size * (1 - crop_ratio)), padding_mode='reflect'),
+        transforms.RandomHorizontalFlip(),
+        RandAugment(1, 5),
+        transforms.ToTensor(),
+    ])
+
+    transform_strong = transforms.Compose([
+        transforms.Resize(crop_size),
+        transforms.RandomCrop(crop_size, padding=int(crop_size * (1 - crop_ratio)), padding_mode='reflect'),
+        transforms.RandomHorizontalFlip(),
+        RandAugment(3, 5),
+        transforms.ToTensor(),
+    ])
+
+    transform_original = transforms.Compose([
+        transforms.ToTensor(),
+    ])
+
+    return transform_weak, transform_medium, transform_strong, transform_original
+
 def get_cifar_transforms(args):
     crop_size = args.img_size
     crop_ratio = args.crop_ratio
@@ -121,6 +154,7 @@ def get_cifar_transforms(args):
 
     transform_val = transforms.Compose([
         ToTensor(),
+        transforms.Normalize(mean[args.dataset], std[args.dataset])
     ])
 
     return transform_weak, transform_medium, transform_strong, transform_val
@@ -134,7 +168,7 @@ def load_local_data(folder):
                 img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)  # Convert BGR to RGB
                 images.append(img)
                 labels.append(label)
-        images = np.stack(images)
+        images = transpose(np.stack(images))
         labels = np.array(labels)
         return images, labels
 
@@ -162,36 +196,50 @@ def get_cifar(args, alg, name, num_labels, num_classes, data_dir='./data', prelo
         medium_folder = os.path.join('./data', 'augmented', 'medium')
         strong_folder1 = os.path.join('./data', 'augmented', 'strong1')
         strong_folder2 = os.path.join('./data', 'augmented', 'strong2')
+        test_folder = os.path.join('./data', 'augmented', 'test')
 
         data, targets = load_local_data(original_folder)
-        w_data1, targets1 = load_local_data(weak_folder1)
-        w_data2, targets2 = load_local_data(weak_folder2)
-        m_data, targets3 = load_local_data(medium_folder)
-        s_data1, targets4 = load_local_data(strong_folder1)
-        s_data2, targets5 = load_local_data(strong_folder2)
+        # w_data1, targets1 = load_local_data(weak_folder1)
+        # w_data2, targets2 = load_local_data(weak_folder2)
+        # m_data, targets3 = load_local_data(medium_folder)
+        # s_data1, targets4 = load_local_data(strong_folder1)
+        # s_data2, targets5 = load_local_data(strong_folder2)
+        test_data, test_targets = load_local_data(test_folder)
 
-        assert len(targets) == 50000
-        assert np.all(targets == targets1) and np.all(targets1 == targets2) and \
-        np.all(targets2 == targets3) and np.all(targets3 == targets4) and \
-        np.all(targets4 == targets5), "Targets are not identical"
+        # assert len(targets) == 50000
+        # assert np.all(targets == targets1) and np.all(targets1 == targets2) and \
+        # np.all(targets2 == targets3) and np.all(targets3 == targets4) and \
+        # np.all(targets4 == targets5), "Targets are not identical"
 
         
         train_labeled_idxs, train_unlabeled_idxs, val_idxs = train_val_split(targets, int(num_labels/10))
-        lb_targets = targets[train_labeled_idxs]
-        ulb_targets = targets[train_unlabeled_idxs]
-        val_targets = targets[val_idxs]
+        # lb_targets = targets[train_labeled_idxs]
+        # ulb_targets = targets[train_unlabeled_idxs]
+        # val_targets = targets[val_idxs]
+        # count_lb_ulb(lb_targets, ulb_targets)
+        # from collections import Counter
+        # print("labeled targets distribution:", Counter(lb_targets))
+        # print("unlabeled targets distribution:", Counter(ulb_targets))
+        # lb_dset = PreloadBasicDataset(alg, w_data1[train_labeled_idxs], w_data2[train_labeled_idxs], m_data[train_labeled_idxs], s_data1[train_labeled_idxs], s_data2[train_labeled_idxs], lb_targets, v_t, num_classes, False, False)
+
+        # ulb_dset = PreloadBasicDataset(alg, w_data1[train_unlabeled_idxs], w_data2[train_unlabeled_idxs], m_data[train_unlabeled_idxs], s_data1[train_unlabeled_idxs], s_data2[train_unlabeled_idxs], ulb_targets, v_t, num_classes, True, False)
+
+        # val_dset = PreloadBasicDataset(alg, data[val_idxs], None, None, None, None, val_targets, v_t, num_classes, False, False, False)
+
+        # test_dset = PreloadBasicDataset(alg, test_data, None, None, None, None, test_targets, v_t, num_classes, False, False, True)
+        lb_data, lb_targets, ulb_data, ulb_targets = data[train_labeled_idxs], targets[train_labeled_idxs], data[train_unlabeled_idxs], targets[train_unlabeled_idxs]
+        val_data, val_targets = data[val_idxs], targets[val_idxs]
         count_lb_ulb(lb_targets, ulb_targets)
-        lb_dset = PreloadBasicDataset(alg, w_data1[train_labeled_idxs], w_data2[train_labeled_idxs], m_data[train_labeled_idxs], s_data1[train_labeled_idxs], s_data2[train_labeled_idxs], lb_targets, v_t, num_classes, False, False)
-
-        ulb_dset = PreloadBasicDataset(alg, w_data1[train_unlabeled_idxs], w_data2[train_unlabeled_idxs], m_data[train_unlabeled_idxs], s_data1[train_unlabeled_idxs], s_data2[train_unlabeled_idxs], ulb_targets, v_t, num_classes, True, False)
-
-        val_dset = PreloadBasicDataset(alg, data[val_idxs], None, None, None, None, val_targets, v_t, num_classes, False, False)
+        lb_dset = BasicDataset(alg, lb_data, lb_targets, num_classes, w_t, False, s_t, s_t, False)
+        ulb_dset = BasicDataset(alg, ulb_data, ulb_targets, num_classes, w_t, True, m_t, s_t, False)
+        val_dset = BasicDataset(alg, val_data, val_targets, num_classes, v_t, False, None, None, False)
+        test_dset = BasicDataset(alg, test_data, test_targets, num_classes, v_t, False, None, None, False)
     else:
         dset = getattr(torchvision.datasets, name.upper())
         dset = dset(data_dir, train=True, download=True)
         data, targets = dset.data, dset.targets
         data, targets = np.array(data), np.array(targets)
-        data = transpose(data)
+        # data = transpose(data)
 
         train_labeled_idxs, train_unlabeled_idxs, val_idxs = train_val_split(targets, int(num_labels/10))
         lb_data, lb_targets, ulb_data, ulb_targets = data[train_labeled_idxs], targets[train_labeled_idxs], data[train_unlabeled_idxs], targets[train_unlabeled_idxs]
@@ -201,13 +249,13 @@ def get_cifar(args, alg, name, num_labels, num_classes, data_dir='./data', prelo
         ulb_dset = BasicDataset(alg, ulb_data, ulb_targets, num_classes, w_t, True, m_t, s_t, False)
         val_dset = BasicDataset(alg, val_data, val_targets, num_classes, v_t, False, None, None, False)
 
-    # Load test dataset
-    dset = getattr(torchvision.datasets, name.upper())
-    dset = dset(data_dir, train=False, download=True)
-    test_data, test_targets = dset.data, dset.targets
-    test_data, test_targets = np.array(test_data), np.array(test_targets)
-    test_data = transpose(test_data)
-    test_dset = BasicDataset(alg, test_data, test_targets, num_classes, v_t, False, None, None, False)
+        # Load test dataset
+        dset = getattr(torchvision.datasets, name.upper())
+        dset = dset(data_dir, train=False, download=True)
+        test_data, test_targets = dset.data, dset.targets
+        test_data, test_targets = np.array(test_data), np.array(test_targets)
+        # test_data = transpose(test_data)
+        test_dset = BasicDataset(alg, test_data, test_targets, num_classes, v_t, False, None, None, False)
 
     return lb_dset, ulb_dset, val_dset, test_dset
 
@@ -228,28 +276,33 @@ def main(name, data_dir='./data'):
     medium_dir = "./data/augmented/medium"
     strong_dir1 = "./data/augmented/strong1"
     strong_dir2 = "./data/augmented/strong2"
+    test_dir = "./data/augmented/test"
 
     data_dir = os.path.join(data_dir, name.lower())
     dataset = getattr(torchvision.datasets, name.upper())
-    dataset = dataset(data_dir, train=True, download=True)
+    dataset_train = dataset(data_dir, train=True, download=True)
+    dataset_test = dataset(data_dir, train=False, download=True)
     class Args:
         dataset = name
         img_size = 32
         crop_ratio = 0.875
     args = Args()
-    weak_transform, medium_transform, strong_transform, ori_transform = get_cifar_transforms(args)
+    weak_transform, medium_transform, strong_transform, ori_transform = preprocess_cifar_transforms(args)
     
     # Perform transformations and save images
     print("Saving original...")
-    save_images(dataset, ori_transform, original_dir)
+    # save_images(dataset_train, ori_transform, original_dir)
 
     print("Saving weak transformations...")
-    save_images(dataset, weak_transform, weak_dir1)
-    save_images(dataset, weak_transform, weak_dir2)
+    save_images(dataset_train, weak_transform, weak_dir1)
+    save_images(dataset_train, weak_transform, weak_dir2)
 
     print("Saving medium transformations...")
-    save_images(dataset, medium_transform, medium_dir)
+    save_images(dataset_train, medium_transform, medium_dir)
 
     print("Saving strong transformations...")
-    save_images(dataset, strong_transform, strong_dir1)
-    save_images(dataset, strong_transform, strong_dir2)
+    save_images(dataset_train, strong_transform, strong_dir1)
+    save_images(dataset_train, strong_transform, strong_dir2)
+
+    print("Saving test...")
+    save_images(dataset_test, ori_transform, test_dir)

@@ -21,7 +21,6 @@ import torch.nn.functional as F
 import models.wideresnet as models
 import dataset.cifar as dataset
 from utils import Bar, Logger, AverageMeter, accuracy, mkdir_p, savefig
-from utils.randaugment import RandAugment
 from tensorboardX import SummaryWriter
 
 parser = argparse.ArgumentParser(description='PyTorch ReMixMatch Training')
@@ -35,6 +34,11 @@ parser.add_argument('--batch-size', default=128, type=int, metavar='N',
 parser.add_argument('--lr', '--learning-rate', default=0.002, type=float,
                     metavar='LR', help='initial learning rate')
 parser.add_argument('--dataset', default='cifar10', type=str)
+
+# Preload augmented data
+parser.add_argument('--preload', default=False, type=bool, 
+                    help='Define if the data is from preprocessed augmented data. If true it may speed up training speed and fully utilize the GPU')
+
 # Checkpoints
 parser.add_argument('--resume', default='', type=str, metavar='PATH',
                     help='path to latest checkpoint (default: none)')
@@ -87,7 +91,7 @@ def main():
     # Data
     print(f'==> Preparing cifar10')
 
-    labeled_set, unlabeled_set, val_set, test_set = dataset.get_cifar(args, 'remixmatch', args.dataset, args.n_labeled, args.num_classes)    
+    labeled_set, unlabeled_set, val_set, test_set = dataset.get_cifar(args, 'remixmatch', args.dataset, args.n_labeled, args.num_classes, preload=args.preload)    
     labeled_trainloader = data.DataLoader(labeled_set, batch_size=args.batch_size, shuffle=True, num_workers=0, drop_last=True)
     unlabeled_trainloader = data.DataLoader(unlabeled_set, batch_size=args.batch_size, shuffle=True, num_workers=0, drop_last=True)
     val_loader = data.DataLoader(val_set, batch_size=args.batch_size, shuffle=False, num_workers=0)
@@ -297,8 +301,6 @@ def train(labeled_trainloader, unlabeled_trainloader, model, optimizer, ema_opti
             with torch.no_grad():
                 # Modify the last layer of the model
                 logits_rot = model(rotate_u, True)
-                print(logits_rot)
-            print(rot_v)
             rot_loss = F.cross_entropy(logits_rot, rot_v, reduction='mean')
             rot_loss = rot_loss.mean()
             loss += args.lambda_rot * rot_loss

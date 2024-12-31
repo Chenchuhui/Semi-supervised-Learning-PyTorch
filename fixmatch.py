@@ -86,7 +86,7 @@ def main():
     # Data
     print(f'==> Preparing cifar10')
 
-    labeled_set, unlabeled_set, val_set, test_set = dataset.get_cifar(args, 'simmatch', args.dataset, args.n_labeled, args.num_classes)    
+    labeled_set, unlabeled_set, val_set, test_set = dataset.get_cifar(args, 'fixmatch', args.dataset, args.n_labeled, args.num_classes)    
     labeled_trainloader = data.DataLoader(labeled_set, batch_size=args.batch_size, shuffle=True, num_workers=0, drop_last=True)
     unlabeled_trainloader = data.DataLoader(unlabeled_set, batch_size=args.batch_size, shuffle=True, num_workers=0, drop_last=True)
     val_loader = data.DataLoader(val_set, batch_size=args.batch_size, shuffle=False, num_workers=0)
@@ -111,7 +111,7 @@ def main():
     cudnn.benchmark = True
     print('    Total params: %.2fM' % (sum(p.numel() for p in model.parameters())/1000000.0))
 
-    train_criterion = SemiLoss()
+    train_criterion = CELoss()
     criterion = nn.CrossEntropyLoss()
     optimizer = optim.Adam(model.parameters(), lr=args.lr)
 
@@ -184,7 +184,7 @@ def main():
     print(np.mean(test_accs[-20:]))
 
 
-def train(labeled_trainloader, unlabeled_trainloader, model, optimizer, ema_optimizer, criterion, epoch, use_cuda):
+def train(labeled_trainloader, unlabeled_trainloader, model, optimizer, ema_optimizer, epoch, use_cuda):
 
     batch_time = AverageMeter()
     data_time = AverageMeter()
@@ -213,18 +213,12 @@ def train(labeled_trainloader, unlabeled_trainloader, model, optimizer, ema_opti
         try:
             u = next(unlabeled_train_iter)
             inputs_u1 = u['x_ulb_w']
-            inputs_u2 = u['x_ulb_s_0']
-            inputs_u3 = u['x_ulb_s_1']
-            rotate_u = u['x_ulb_s_0_rot']
-            rot_v = u['rot_v']
+            inputs_u2 = u['x_ulb_s']
         except:
             unlabeled_train_iter = iter(unlabeled_trainloader)
             u = next(unlabeled_train_iter)
             inputs_u1 = u['x_ulb_w']
-            inputs_u2 = u['x_ulb_s_0']
-            inputs_u3 = u['x_ulb_s_1']
-            rotate_u = u['x_ulb_s_0_rot']
-            rot_v = u['rot_v']
+            inputs_u2 = u['x_ulb_s']
 
         # measure data loading time
         data_time.update(time.time() - end)
@@ -238,9 +232,6 @@ def train(labeled_trainloader, unlabeled_trainloader, model, optimizer, ema_opti
             inputs_x, targets_x = inputs_x.cuda(), targets_x.cuda(non_blocking=True)
             inputs_u1 = inputs_u1.cuda()
             inputs_u2 = inputs_u2.cuda()
-            inputs_u3 = inputs_u3.cuda()
-            rotate_u = rotate_u.cuda()
-            rot_v = rot_v.cuda()
 
 
         with torch.no_grad():
@@ -251,54 +242,27 @@ def train(labeled_trainloader, unlabeled_trainloader, model, optimizer, ema_opti
             targets_u = pt / pt.sum(dim=1, keepdim=True)
             targets_u = targets_u.detach()
 
-        # mixup
-        all_inputs = torch.cat([inputs_x, inputs_u1, inputs_u2, inputs_u3], dim=0)
-        all_targets = torch.cat([targets_x, targets_u, targets_u, targets_u], dim=0)
 
-        l = np.random.beta(args.alpha, args.alpha)
+        batch_size = inputs_x.shape[0]
+        inputs = interleave(
+            torch.cat((inputs_x, inputs_u1, inputs_u2)), 2*args.mu+1).to(args.device)
+        targets_x = targets_x.to(args.device)
+        logits = model(inputs)
+        logits = de_interleave(logits, 2*args.mu+1)
+        logits_x = logits[:batch_size]
+        logits_u_w, logits_u_s = logits[batch_size:].chunk(2)
+        del logits
 
-        l = max(l, 1-l)
+        Lx = F.cross_entropy(logits_x, targets_x, reduction='mean')
 
-        idx = torch.randperm(all_inputs.size(0))
+        pseudo_label = torch.softmax(logits_u_w.detach()/args.T, dim=-1)
+        max_probs, targets_u = torch.max(pseudo_label, dim=-1)
+        mask = max_probs.ge(args.threshold).float()
 
-        input_a, input_b = all_inputs, all_inputs[idx]
-        target_a, target_b = all_targets, all_targets[idx]
+        Lu = (F.cross_entropy(logits_u_s, targets_u,
+                                reduction='none') * mask).mean()
 
-        # Mixup
-        mixed_input = l * input_a + (1 - l) * input_b
-        mixed_target = l * target_a + (1 - l) * target_b
-
-        # interleave labeled and unlabed samples between batches to get correct batchnorm calculation 
-        mixed_input = list(torch.split(mixed_input, batch_size))
-        mixed_input = interleave(mixed_input, batch_size)
-
-        logits = [model(mixed_input[0])]
-        for input in mixed_input[1:]:
-            logits.append(model(input))
-
-        # put interleaved samples back
-        logits = interleave(logits, batch_size)
-        logits_x = logits[0]
-        logits_u = torch.cat(logits[1:], dim=0)
-
-        Lx, Lu, w = criterion(logits_x, mixed_target[:batch_size], logits_u, mixed_target[batch_size:], epoch+batch_idx/args.train_iteration)
-
-        loss = Lx + w * Lu
-
-        # u1 loss
-        logits_u1 = model(inputs_u1)
-        probs_u1 = torch.softmax(logits_u1, dim=1)
-        u1_loss = F.kl_div(probs_u1, targets_u, reduction='batchmean') 
-        loss += args.lambda_kl * u1_loss
-
-        # Rotation Loss
-        if args.lambda_rot > 0:
-            with torch.no_grad():
-                # Modify the last layer of the model
-                logits_rot = model(rotate_u, True)
-            rot_loss = F.cross_entropy(logits_rot, rot_v, reduction='mean')
-            rot_loss = rot_loss.mean()
-            loss += args.lambda_rot * rot_loss
+        loss = Lx + args.lambda_u * Lu
         
         # record loss
         losses.update(loss.item(), inputs_x.size(0))
@@ -399,15 +363,6 @@ def linear_rampup(current, rampup_length=args.epochs):
         current = np.clip(current / rampup_length, 0.0, 1.0)
         return float(current)
 
-class SemiLoss(object):
-    def __call__(self, outputs_x, targets_x, outputs_u, targets_u, epoch):
-        probs_u = torch.softmax(outputs_u, dim=1)
-
-        Lx = -torch.mean(torch.sum(F.log_softmax(outputs_x, dim=1) * targets_x, dim=1))
-        Lu = torch.mean((probs_u - targets_u)**2)
-
-        return Lx, Lu, args.lambda_u * linear_rampup(epoch)
-
 class WeightEMA(object):
     def __init__(self, model, ema_model, alpha=0.999):
         self.model = model
@@ -428,6 +383,10 @@ class WeightEMA(object):
                 ema_param.add_(param * one_minus_alpha)
                 # customized weight decay
                 param.mul_(1 - self.wd)
+
+def de_interleave(x, size):
+    s = list(x.shape)
+    return x.reshape([size, -1] + s[1:]).transpose(0, 1).reshape([-1] + s[1:])
 
 def interleave_offsets(batch, nu):
     groups = [batch // (nu + 1)] * (nu + 1)

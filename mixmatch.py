@@ -35,7 +35,8 @@ parser.add_argument('--lr', '--learning-rate', default=0.002, type=float,
 parser.add_argument('--dataset', default='cifar10', type=str)
 
 # Preload augmented data
-parser.add_argument('--preload', default=False, type=bool, help='Define if the data is from preprocessed augmented data. If true it may speed up training speed and fully utilize the GPU')
+parser.add_argument('--preload', default=False, type=bool, 
+                    help='Define if the data is from preprocessed augmented data. If true it may speed up training speed and fully utilize the GPU')
 # Checkpoints
 parser.add_argument('--resume', default='', type=str, metavar='PATH',
                     help='path to latest checkpoint (default: none)')
@@ -87,8 +88,8 @@ def main():
     print(f'==> Preparing cifar10')
 
     labeled_set, unlabeled_set, val_set, test_set = dataset.get_cifar(args, 'mixmatch', args.dataset, args.n_labeled, args.num_classes, preload=args.preload)
-    labeled_trainloader = data.DataLoader(labeled_set, batch_size=args.batch_size, shuffle=False, num_workers=0, drop_last=True)
-    unlabeled_trainloader = data.DataLoader(unlabeled_set, batch_size=args.batch_size, shuffle=False, num_workers=0, drop_last=True)
+    labeled_trainloader = data.DataLoader(labeled_set, batch_size=args.batch_size, shuffle=True, num_workers=0, drop_last=True)
+    unlabeled_trainloader = data.DataLoader(unlabeled_set, batch_size=args.batch_size, shuffle=True, num_workers=0, drop_last=True)
     val_loader = data.DataLoader(val_set, batch_size=args.batch_size, shuffle=False, num_workers=0)
     test_loader = data.DataLoader(test_set, batch_size=args.batch_size, shuffle=False, num_workers=0)
 
@@ -328,6 +329,24 @@ def validate(valloader, model, criterion, epoch, use_cuda, mode):
         for batch_idx, batch in enumerate(valloader):
             inputs = batch['x_lb']
             targets = batch['y_lb']
+            # print(targets)
+            # import matplotlib.pyplot as plt
+            # import numpy as np
+            # inputs_x = inputs.cpu().numpy()  # Convert tensor to NumPy array
+            # targets_x = targets.cpu().numpy()
+            # for i in range(64):
+            #     # Convert from CHW to HWC format for visualization
+            #     img_np = inputs_x[i].transpose(1, 2, 0)
+                
+            #     # If normalized, denormalize for proper visualization
+            #     img_np = img_np * 255 if img_np.max() <= 1 else img_np  # Rescale pixel values if needed
+            #     img_np = img_np.astype(np.uint8)
+                
+            #     # Display the image and its corresponding target
+            #     plt.imshow(img_np)
+            #     plt.title(f"Target: {targets_x[i]}")  # Show target as a class index
+            #     plt.axis('off')  # Hide axes for better visualization
+            #     plt.show()
             # measure data loading time
             data_time.update(time.time() - end)
 

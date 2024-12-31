@@ -32,6 +32,7 @@ class PreloadBasicDataset(Dataset):
                  num_classes=None,
                  is_ulb=False,
                  onehot=False,
+                 show_img=False,
                  *args, 
                  **kwargs):
         """
@@ -57,6 +58,7 @@ class PreloadBasicDataset(Dataset):
         self.num_classes = num_classes
         self.is_ulb = is_ulb
         self.onehot = onehot
+        self.show_img = show_img
     
     def __sample__(self, idx):
         """ dataset specific sample function """
@@ -83,12 +85,21 @@ class PreloadBasicDataset(Dataset):
             return weak_augment_image, strong_augment_image, target
         """
         img_w1, img_w2, img_m, img_s1, img_s2, target = self.__sample__(idx)
-        img_w1 = self.transform(img_w1) if img_w1 is not None else None
-        img_w2 = self.transform(img_w2) if img_w2 is not None else None
-        img_m = self.transform(img_m) if img_m is not None else None
-        img_s1 = self.transform(img_s1) if img_s1 is not None else None
-        img_s2 = self.transform(img_s2) if img_s2 is not None else None
         if not self.is_ulb:
+            img_w1 = self.transform(img_w1) if img_w1 is not None else None
+            # if self.show_img:
+            #     import matplotlib.pyplot as plt
+            #     import numpy as np
+            #     img_np = img_w1.numpy().transpose(1, 2, 0)  # Convert from CHW to HWC format
+            #     # If normalized, denormalize for proper visualization
+            #     img_np = img_np * 255 if img_np.max() <= 1 else img_np  # Rescale pixel values if needed
+            #     img_np = img_np.astype(np.uint8)
+
+            #     # Display the image and target
+            #     plt.imshow(img_np)
+            #     plt.title(f"Target: {target}")
+            #     plt.axis('off')  # Hide axes for better visualization
+            #     plt.show()
             return {'x_lb': img_w1, 'y_lb': target} 
         else:
             if self.alg == 'fullysupervised' or self.alg == 'supervised':
@@ -97,11 +108,17 @@ class PreloadBasicDataset(Dataset):
                 return {'idx_ulb': idx, 'x_ulb_w':img_w} 
             elif self.alg == 'pimodel' or self.alg == 'meanteacher' or self.alg == 'mixmatch':
                 # NOTE x_ulb_s here is weak augmentation
+                img_w1 = self.transform(img_w1) if img_w1 is not None else None
+                img_w2 = self.transform(img_w2) if img_w2 is not None else None
                 return {'idx_ulb': idx, 'x_ulb_w': img_w1, 'x_ulb_s': img_w2}
             # elif self.alg == 'sequencematch' or self.alg == 'somematch':
             elif self.alg == 'sequencematch':
                 return {'idx_ulb': idx, 'x_ulb_w': img_w, 'x_ulb_m': self.medium_transform(img), 'x_ulb_s': self.strong_transform(img)} 
             elif self.alg == 'remixmatch':
+                img_w1 = self.transform(img_w1) if img_w1 is not None else None
+                img_w2 = self.transform(img_w2) if img_w2 is not None else None
+                img_s1 = self.transform(img_s1) if img_s1 is not None else None
+                img_s2 = self.transform(img_s2) if img_s2 is not None else None
                 rotate_v_list = [0, 90, 180, 270]
                 rotate_v1 = np.random.choice(rotate_v_list, 1).item()
                 img_s1_rot = torchvision.transforms.functional.rotate(img_s1, rotate_v1)
@@ -109,7 +126,9 @@ class PreloadBasicDataset(Dataset):
             elif self.alg == 'comatch':
                 return {'idx_ulb': idx, 'x_ulb_w': img_w, 'x_ulb_s_0': self.strong_transform(img), 'x_ulb_s_1':self.strong_transform(img)} 
             else:
-                return {'idx_ulb': idx, 'x_ulb_w': img_w, 'x_ulb_s': self.strong_transform(img)} 
+                img_w1 = self.transform(img_w1) if img_w1 is not None else None
+                img_s1 = self.transform(img_s1) if img_s1 is not None else None
+                return {'idx_ulb': idx, 'x_ulb_w': img_w1, 'x_ulb_s': img_s1} 
 
 
     def __len__(self):
