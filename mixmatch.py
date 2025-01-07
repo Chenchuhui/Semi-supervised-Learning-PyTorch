@@ -329,24 +329,6 @@ def validate(valloader, model, criterion, epoch, use_cuda, mode):
         for batch_idx, batch in enumerate(valloader):
             inputs = batch['x_lb']
             targets = batch['y_lb']
-            # print(targets)
-            # import matplotlib.pyplot as plt
-            # import numpy as np
-            # inputs_x = inputs.cpu().numpy()  # Convert tensor to NumPy array
-            # targets_x = targets.cpu().numpy()
-            # for i in range(64):
-            #     # Convert from CHW to HWC format for visualization
-            #     img_np = inputs_x[i].transpose(1, 2, 0)
-                
-            #     # If normalized, denormalize for proper visualization
-            #     img_np = img_np * 255 if img_np.max() <= 1 else img_np  # Rescale pixel values if needed
-            #     img_np = img_np.astype(np.uint8)
-                
-            #     # Display the image and its corresponding target
-            #     plt.imshow(img_np)
-            #     plt.title(f"Target: {targets_x[i]}")  # Show target as a class index
-            #     plt.axis('off')  # Hide axes for better visualization
-            #     plt.show()
             # measure data loading time
             data_time.update(time.time() - end)
 

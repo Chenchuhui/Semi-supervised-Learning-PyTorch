@@ -1,8 +1,10 @@
 # Copyright (c) Microsoft Corporation.
 # Licensed under the MIT License.
 
-import copy
+import math
 import numpy as np 
+from collections import deque
+
 from PIL import Image
 import torchvision
 from torchvision import transforms
@@ -12,7 +14,7 @@ from .augmentation import RandAugment
 from .utils import get_onehot
 
 
-class PreloadBasicDataset(Dataset):
+class PreAugBasicDataset(Dataset):
     """
     BasicDataset returns a pair of image and labels (targets).
     If targets are not given, BasicDataset returns None as the label.
@@ -22,17 +24,14 @@ class PreloadBasicDataset(Dataset):
 
     def __init__(self,
                  alg,
-                 w_data1,
-                 w_data2=None,
-                 m_data=None,
-                 s_data1=None,
-                 s_data2=None,
+                 data,
                  targets=None,
-                 transform=None,
                  num_classes=None,
+                 w_transform=None,
+                 m_transform=None,
+                 s_transform=None,
                  is_ulb=False,
                  onehot=False,
-                 show_img=False,
                  *args, 
                  **kwargs):
         """
@@ -45,20 +44,50 @@ class PreloadBasicDataset(Dataset):
             strong_transform: list of transformation functions for strong augmentation
             onehot: If True, label is converted into onehot vector.
         """
-        super(PreloadBasicDataset, self).__init__()
+        super(PreAugBasicDataset, self).__init__()
         self.alg = alg
-        self.w_data1 = w_data1
-        self.w_data2 = w_data2
-        self.m_data = m_data
-        self.s_data1 = s_data1
-        self.s_data2 = s_data2
+        self.data = data
         self.targets = targets
-        self.transform = transform
+        self.w_transform = w_transform
+        self.m_transform = m_transform
+        self.s_transform = s_transform
 
         self.num_classes = num_classes
         self.is_ulb = is_ulb
         self.onehot = onehot
-        self.show_img = show_img
+        self.augmentation_factor = math.ceil(kwargs['batch_size'] * kwargs['iteration'] / len(self.data))
+
+        # Data augmentation Now
+        self.w_data, self.m_data, self.s_data = self.transform_data()
+
+    def transform_data(self):
+        print(self.augmentation_factor)
+        w_data_lst = [deque() for _ in range(len(self.data))]
+        m_data_lst = [deque() for _ in range(len(self.data))] if self.is_ulb else None
+        s_data_lst = [deque() for _ in range(len(self.data))] if self.is_ulb else None
+
+        for i, img in enumerate(self.data):
+            try:
+                if isinstance(img, np.ndarray):
+                    img = Image.fromarray(img)
+                if not self.is_ulb:
+                    for _ in range(self.augmentation_factor):
+                        w_data_lst[i].append(self.w_transform(img))
+                else:
+                    if self.alg == "mixmatch":
+                        for _ in range(self.augmentation_factor * 2):
+                            w_data_lst[i].append(self.w_transform(img))
+                    elif self.alg == "remixmatch":
+                        for _ in range(self.augmentation_factor):
+                            w_data_lst[i].append(self.w_transform(img))
+                            s_data_lst[i].append(self.s_transform(img))
+                            s_data_lst[i].append(self.s_transform(img))
+            except Exception as e:
+                print(f"Error processing sample {i}: {e}")
+
+        assert len(w_data_lst) == len(self.data), "Mismatch between data and augmented data length"
+        return w_data_lst, m_data_lst, s_data_lst
+
     
     def __sample__(self, idx):
         """ dataset specific sample function """
@@ -70,12 +99,43 @@ class PreloadBasicDataset(Dataset):
             target = target_ if not self.onehot else get_onehot(self.num_classes, target_)
 
         # set augmented images
-        img_w1 = self.w_data1[idx] if self.w_data1 is not None else None
-        img_w2 = self.w_data2[idx] if self.w_data2 is not None else None
-        img_m = self.m_data[idx] if self.m_data is not None else None
-        img_s1 = self.s_data1[idx] if self.s_data1 is not None else None
-        img_s2 = self.s_data2[idx] if self.s_data2 is not None else None
-        return img_w1, img_w2, img_m, img_s1, img_s2, target
+        try:
+            img = self.data[idx]
+            if isinstance(img, np.ndarray):
+                img = Image.fromarray(img)
+            if self.w_data is not None and len(self.w_data[idx]) > 0:
+                img_w1 = self.w_data[idx].popleft()
+                self.w_data[idx].append(img_w1)  # Add it back to the end of the queue
+            else:
+                img_w1 = self.w_transform(img)
+            
+            if self.w_data is not None and len(self.w_data[idx]) > 0:
+                img_w2 = self.w_data[idx].popleft()
+                self.w_data[idx].append(img_w2)  # Add it back to the end of the queue
+            else:
+                img_w2 = None
+            
+            if self.m_data is not None and len(self.m_data[idx]) > 0:
+                img_m = self.m_data[idx].popleft()
+                self.m_data[idx].append(img_m)  # Add it back to the end of the queue
+            else:
+                img_m = None
+            
+            if self.s_data is not None and len(self.s_data[idx]) > 0:
+                img_s1 = self.s_data[idx].popleft()
+                self.s_data[idx].append(img_s1)  # Add it back to the end of the queue
+            else:
+                img_s1 = None
+            
+            if self.s_data is not None and len(self.s_data[idx]) > 0:
+                img_s2 = self.s_data[idx].popleft()
+                self.s_data[idx].append(img_s2)  # Add it back to the end of the queue
+            else:
+                img_s2 = None
+        except IndexError:
+            raise Exception(f"Not enough augmented data for index {idx}. Increase `num_augmentations` or adjust batch size/iterations.")
+        return img, img_w1, img_w2, img_m, img_s1, img_s2, target
+        # return img, target
 
     def __getitem__(self, idx):
         """
@@ -84,22 +144,9 @@ class PreloadBasicDataset(Dataset):
         else:
             return weak_augment_image, strong_augment_image, target
         """
-        img_w1, img_w2, img_m, img_s1, img_s2, target = self.__sample__(idx)
+        img, img_w1, img_w2, img_m, img_s1, img_s2, target = self.__sample__(idx)
+        # img, target = self.__sample__(idx)
         if not self.is_ulb:
-            img_w1 = self.transform(img_w1) if img_w1 is not None else None
-            # if self.show_img:
-            #     import matplotlib.pyplot as plt
-            #     import numpy as np
-            #     img_np = img_w1.numpy().transpose(1, 2, 0)  # Convert from CHW to HWC format
-            #     # If normalized, denormalize for proper visualization
-            #     img_np = img_np * 255 if img_np.max() <= 1 else img_np  # Rescale pixel values if needed
-            #     img_np = img_np.astype(np.uint8)
-
-            #     # Display the image and target
-            #     plt.imshow(img_np)
-            #     plt.title(f"Target: {target}")
-            #     plt.axis('off')  # Hide axes for better visualization
-            #     plt.show()
             return {'x_lb': img_w1, 'y_lb': target} 
         else:
             if self.alg == 'fullysupervised' or self.alg == 'supervised':
@@ -108,17 +155,13 @@ class PreloadBasicDataset(Dataset):
                 return {'idx_ulb': idx, 'x_ulb_w':img_w} 
             elif self.alg == 'pimodel' or self.alg == 'meanteacher' or self.alg == 'mixmatch':
                 # NOTE x_ulb_s here is weak augmentation
-                img_w1 = self.transform(img_w1) if img_w1 is not None else None
-                img_w2 = self.transform(img_w2) if img_w2 is not None else None
                 return {'idx_ulb': idx, 'x_ulb_w': img_w1, 'x_ulb_s': img_w2}
             # elif self.alg == 'sequencematch' or self.alg == 'somematch':
             elif self.alg == 'sequencematch':
                 return {'idx_ulb': idx, 'x_ulb_w': img_w, 'x_ulb_m': self.medium_transform(img), 'x_ulb_s': self.strong_transform(img)} 
             elif self.alg == 'remixmatch':
-                img_w1 = self.transform(img_w1) if img_w1 is not None else None
-                img_w2 = self.transform(img_w2) if img_w2 is not None else None
-                img_s1 = self.transform(img_s1) if img_s1 is not None else None
-                img_s2 = self.transform(img_s2) if img_s2 is not None else None
+                if img_w1 is None or img_s1 is None or img_s2 is None:
+                    raise Exception("One or more of augmented images are None")
                 rotate_v_list = [0, 90, 180, 270]
                 rotate_v1 = np.random.choice(rotate_v_list, 1).item()
                 img_s1_rot = torchvision.transforms.functional.rotate(img_s1, rotate_v1)
@@ -132,7 +175,7 @@ class PreloadBasicDataset(Dataset):
 
 
     def __len__(self):
-        return len(self.w_data1)
+        return len(self.data)
 
 class BasicDataset(Dataset):
     """
@@ -209,8 +252,8 @@ class BasicDataset(Dataset):
         if self.transform is None:
             return  {'x_lb':  transforms.ToTensor()(img), 'y_lb': target}
         else:
-            # if isinstance(img, np.ndarray):
-            #     img = Image.fromarray(img)
+            if isinstance(img, np.ndarray):
+                img = Image.fromarray(img)
             img_w = self.transform(img)
             if not self.is_ulb:
                 return {'idx_lb': idx, 'x_lb': img_w, 'y_lb': target} 

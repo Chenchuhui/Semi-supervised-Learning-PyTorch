@@ -111,7 +111,6 @@ def main():
     cudnn.benchmark = True
     print('    Total params: %.2fM' % (sum(p.numel() for p in model.parameters())/1000000.0))
 
-    train_criterion = CELoss()
     criterion = nn.CrossEntropyLoss()
     optimizer = optim.Adam(model.parameters(), lr=args.lr)
 
@@ -144,7 +143,7 @@ def main():
 
         print('\nEpoch: [%d | %d] LR: %f' % (epoch + 1, args.epochs, state['lr']))
 
-        train_loss, train_loss_x, train_loss_u = train(labeled_trainloader, unlabeled_trainloader, model, optimizer, ema_optimizer, train_criterion, epoch, use_cuda)
+        train_loss, train_loss_x, train_loss_u = train(labeled_trainloader, unlabeled_trainloader, model, optimizer, ema_optimizer, epoch, use_cuda)
         _, train_acc = validate(labeled_trainloader, ema_model, criterion, epoch, use_cuda, mode='Train Stats')
         val_loss, val_acc = validate(val_loader, ema_model, criterion, epoch, use_cuda, mode='Valid Stats')
         test_loss, test_acc = validate(test_loader, ema_model, criterion, epoch, use_cuda, mode='Test Stats ')
@@ -191,7 +190,7 @@ def train(labeled_trainloader, unlabeled_trainloader, model, optimizer, ema_opti
     losses = AverageMeter()
     losses_x = AverageMeter()
     losses_u = AverageMeter()
-    ws = AverageMeter()
+    mask_probs = AverageMeter()
     end = time.time()
 
     bar = Bar('Training', max=args.train_iteration)
@@ -263,22 +262,23 @@ def train(labeled_trainloader, unlabeled_trainloader, model, optimizer, ema_opti
                                 reduction='none') * mask).mean()
 
         loss = Lx + args.lambda_u * Lu
+
+        loss.backward()
         
         # record loss
         losses.update(loss.item(), inputs_x.size(0))
         losses_x.update(Lx.item(), inputs_x.size(0))
         losses_u.update(Lu.item(), inputs_x.size(0))
-        ws.update(w, inputs_x.size(0))
 
         # compute gradient and do SGD step
         optimizer.zero_grad()
-        loss.backward()
         optimizer.step()
         ema_optimizer.step()
 
         # measure elapsed time
         batch_time.update(time.time() - end)
         end = time.time()
+        mask_probs.update(mask.mean().item())
 
         # plot progress
         bar.suffix  = '({batch}/{size}) Data: {data:.3f}s | Batch: {bt:.3f}s | Total: {total:} | ETA: {eta:} | Loss: {loss:.4f} | Loss_x: {loss_x:.4f} | Loss_u: {loss_u:.4f} | W: {w:.4f}'.format(
@@ -291,7 +291,7 @@ def train(labeled_trainloader, unlabeled_trainloader, model, optimizer, ema_opti
                     loss=losses.avg,
                     loss_x=losses_x.avg,
                     loss_u=losses_u.avg,
-                    w=ws.avg,
+                    mask=mask_probs.avg
                     )
         bar.next()
     bar.finish()
@@ -355,13 +355,6 @@ def save_checkpoint(state, is_best, checkpoint=args.out, filename='checkpoint.pt
     torch.save(state, filepath)
     if is_best:
         shutil.copyfile(filepath, os.path.join(checkpoint, 'model_best.pth.tar'))
-
-def linear_rampup(current, rampup_length=args.epochs):
-    if rampup_length == 0:
-        return 1.0
-    else:
-        current = np.clip(current / rampup_length, 0.0, 1.0)
-        return float(current)
 
 class WeightEMA(object):
     def __init__(self, model, ema_model, alpha=0.999):

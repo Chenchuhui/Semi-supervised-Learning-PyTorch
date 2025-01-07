@@ -11,7 +11,7 @@ import cv2
 
 from torchvision import transforms
 import torchvision.transforms.functional as F
-from .datasetbase import BasicDataset, PreloadBasicDataset
+from .datasetbase import BasicDataset, PreAugBasicDataset
 from .augmentation import RandAugment, RandomResizedCropAndInterpolation
 from .utils import split_ssl_data
 
@@ -130,9 +130,10 @@ def get_cifar_transforms(args):
     crop_ratio = args.crop_ratio
 
     transform_weak = transforms.Compose([
-        RandomPadandCrop(crop_size),
-        RandomFlip(),
-        ToTensor(),
+        transforms.Resize(crop_size),
+        transforms.RandomCrop(crop_size, padding=int(crop_size * (1 - crop_ratio)), padding_mode='reflect'),
+        transforms.RandomHorizontalFlip(),
+        transforms.ToTensor(),
         transforms.Normalize(mean[args.dataset], std[args.dataset])
     ])
 
@@ -146,14 +147,17 @@ def get_cifar_transforms(args):
     ])
 
     transform_strong = transforms.Compose([
-        RandomPadandCrop(crop_size),
-        RandomFlip(),
-        ToTensor(),
+        transforms.Resize(crop_size),
+        transforms.RandomCrop(crop_size, padding=int(crop_size * (1 - crop_ratio)), padding_mode='reflect'),
+        transforms.RandomHorizontalFlip(),
+        RandAugment(3, 5),
+        transforms.ToTensor(),
         transforms.Normalize(mean[args.dataset], std[args.dataset])
     ])
 
     transform_val = transforms.Compose([
-        ToTensor(),
+        transforms.Resize(crop_size),
+        transforms.ToTensor(),
         transforms.Normalize(mean[args.dataset], std[args.dataset])
     ])
 
@@ -175,6 +179,15 @@ def load_local_data(folder):
 def get_cifar(args, alg, name, num_labels, num_classes, data_dir='./data', preload=False):
     data_dir = os.path.join(data_dir, name.lower())
     w_t, m_t, s_t, v_t = get_cifar_transforms(args)
+    dset = getattr(torchvision.datasets, name.upper())
+    dset = dset(data_dir, train=True, download=True)
+    data, targets = dset.data, dset.targets
+    data, targets = np.array(data), np.array(targets)
+    # data = transpose(data)
+
+    train_labeled_idxs, train_unlabeled_idxs, val_idxs = train_val_split(targets, int(num_labels/10))
+    lb_data, lb_targets, ulb_data, ulb_targets = data[train_labeled_idxs], targets[train_labeled_idxs], data[train_unlabeled_idxs], targets[train_unlabeled_idxs]
+    val_data, val_targets = data[val_idxs], targets[val_idxs]
     
     def count_lb_ulb(lb_targets, ulb_targets):
         lb_count = [0 for _ in range(num_classes)]
@@ -185,77 +198,26 @@ def get_cifar(args, alg, name, num_labels, num_classes, data_dir='./data', prelo
             ulb_count[c] += 1
         print("lb count: {}".format(lb_count))
         print("ulb count: {}".format(ulb_count))
-
+    count_lb_ulb(lb_targets, ulb_targets)
     # if alg == 'fullysupervised':
     #     lb_data = data
     #     lb_targets = targets
     if preload:
-        original_folder = os.path.join('./data', 'augmented', 'original')
-        weak_folder1 = os.path.join('./data', 'augmented', 'weak1')
-        weak_folder2 = os.path.join('./data', 'augmented', 'weak2')
-        medium_folder = os.path.join('./data', 'augmented', 'medium')
-        strong_folder1 = os.path.join('./data', 'augmented', 'strong1')
-        strong_folder2 = os.path.join('./data', 'augmented', 'strong2')
-        test_folder = os.path.join('./data', 'augmented', 'test')
+        lb_dset = PreAugBasicDataset(alg, lb_data, lb_targets, num_classes, w_t, m_t, s_t, False, False, batch_size=args.batch_size, iteration=args.train_iteration)
+        ulb_dset = PreAugBasicDataset(alg, ulb_data, ulb_targets, num_classes, w_t, m_t, s_t, True, False, batch_size=args.batch_size, iteration=args.train_iteration)
+        val_dset = PreAugBasicDataset(alg, val_data, val_targets, num_classes, v_t, None, None, False, False, batch_size=1, iteration=1)
 
-        data, targets = load_local_data(original_folder)
-        # w_data1, targets1 = load_local_data(weak_folder1)
-        # w_data2, targets2 = load_local_data(weak_folder2)
-        # m_data, targets3 = load_local_data(medium_folder)
-        # s_data1, targets4 = load_local_data(strong_folder1)
-        # s_data2, targets5 = load_local_data(strong_folder2)
-        test_data, test_targets = load_local_data(test_folder)
-
-        # assert len(targets) == 50000
-        # assert np.all(targets == targets1) and np.all(targets1 == targets2) and \
-        # np.all(targets2 == targets3) and np.all(targets3 == targets4) and \
-        # np.all(targets4 == targets5), "Targets are not identical"
-
-        
-        train_labeled_idxs, train_unlabeled_idxs, val_idxs = train_val_split(targets, int(num_labels/10))
-        # lb_targets = targets[train_labeled_idxs]
-        # ulb_targets = targets[train_unlabeled_idxs]
-        # val_targets = targets[val_idxs]
-        # count_lb_ulb(lb_targets, ulb_targets)
-        # from collections import Counter
-        # print("labeled targets distribution:", Counter(lb_targets))
-        # print("unlabeled targets distribution:", Counter(ulb_targets))
-        # lb_dset = PreloadBasicDataset(alg, w_data1[train_labeled_idxs], w_data2[train_labeled_idxs], m_data[train_labeled_idxs], s_data1[train_labeled_idxs], s_data2[train_labeled_idxs], lb_targets, v_t, num_classes, False, False)
-
-        # ulb_dset = PreloadBasicDataset(alg, w_data1[train_unlabeled_idxs], w_data2[train_unlabeled_idxs], m_data[train_unlabeled_idxs], s_data1[train_unlabeled_idxs], s_data2[train_unlabeled_idxs], ulb_targets, v_t, num_classes, True, False)
-
-        # val_dset = PreloadBasicDataset(alg, data[val_idxs], None, None, None, None, val_targets, v_t, num_classes, False, False, False)
-
-        # test_dset = PreloadBasicDataset(alg, test_data, None, None, None, None, test_targets, v_t, num_classes, False, False, True)
-        lb_data, lb_targets, ulb_data, ulb_targets = data[train_labeled_idxs], targets[train_labeled_idxs], data[train_unlabeled_idxs], targets[train_unlabeled_idxs]
-        val_data, val_targets = data[val_idxs], targets[val_idxs]
-        count_lb_ulb(lb_targets, ulb_targets)
-        lb_dset = BasicDataset(alg, lb_data, lb_targets, num_classes, w_t, False, s_t, s_t, False)
-        ulb_dset = BasicDataset(alg, ulb_data, ulb_targets, num_classes, w_t, True, m_t, s_t, False)
-        val_dset = BasicDataset(alg, val_data, val_targets, num_classes, v_t, False, None, None, False)
-        test_dset = BasicDataset(alg, test_data, test_targets, num_classes, v_t, False, None, None, False)
     else:
-        dset = getattr(torchvision.datasets, name.upper())
-        dset = dset(data_dir, train=True, download=True)
-        data, targets = dset.data, dset.targets
-        data, targets = np.array(data), np.array(targets)
-        # data = transpose(data)
-
-        train_labeled_idxs, train_unlabeled_idxs, val_idxs = train_val_split(targets, int(num_labels/10))
-        lb_data, lb_targets, ulb_data, ulb_targets = data[train_labeled_idxs], targets[train_labeled_idxs], data[train_unlabeled_idxs], targets[train_unlabeled_idxs]
-        val_data, val_targets = data[val_idxs], targets[val_idxs]
-        count_lb_ulb(lb_targets, ulb_targets)
-        lb_dset = BasicDataset(alg, lb_data, lb_targets, num_classes, w_t, False, s_t, s_t, False)
+        lb_dset = BasicDataset(alg, lb_data, lb_targets, num_classes, w_t, False, m_t, s_t, False)
         ulb_dset = BasicDataset(alg, ulb_data, ulb_targets, num_classes, w_t, True, m_t, s_t, False)
         val_dset = BasicDataset(alg, val_data, val_targets, num_classes, v_t, False, None, None, False)
 
-        # Load test dataset
-        dset = getattr(torchvision.datasets, name.upper())
-        dset = dset(data_dir, train=False, download=True)
-        test_data, test_targets = dset.data, dset.targets
-        test_data, test_targets = np.array(test_data), np.array(test_targets)
-        # test_data = transpose(test_data)
-        test_dset = BasicDataset(alg, test_data, test_targets, num_classes, v_t, False, None, None, False)
+    # Load test dataset
+    dset = getattr(torchvision.datasets, name.upper())
+    dset = dset(data_dir, train=False, download=True)
+    test_data, test_targets = dset.data, dset.targets
+    test_data, test_targets = np.array(test_data), np.array(test_targets)
+    test_dset = BasicDataset(alg, test_data, test_targets, num_classes, v_t, False, None, None, False)
 
     return lb_dset, ulb_dset, val_dset, test_dset
 

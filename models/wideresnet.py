@@ -20,6 +20,7 @@ class BasicBlock(nn.Module):
         self.convShortcut = (not self.equalInOut) and nn.Conv2d(in_planes, out_planes, kernel_size=1, stride=stride,
                                padding=0, bias=False) or None
         self.activate_before_residual = activate_before_residual
+    
     def forward(self, x):
         if not self.equalInOut and self.activate_before_residual == True:
             x = self.relu1(self.bn1(x))
