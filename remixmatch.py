@@ -251,7 +251,8 @@ def train(labeled_trainloader, unlabeled_trainloader, model, optimizer, ema_opti
         with torch.no_grad():
             # compute guessed labels of unlabel samples
             outputs_u = model(inputs_u1)
-            p = torch.softmax(outputs_u, dim=1)
+            p = torch.softmax(outputs_u, dim=-1)
+            # Distribution Alignment
             pt = p**(1/args.T)
             targets_u = pt / pt.sum(dim=1, keepdim=True)
             targets_u = targets_u.detach()
@@ -290,10 +291,9 @@ def train(labeled_trainloader, unlabeled_trainloader, model, optimizer, ema_opti
 
         loss = Lx + w * Lu
 
-        # u1 loss
-        logits_u1 = model(inputs_u1)
-        probs_u1 = torch.softmax(logits_u1, dim=1)
-        u1_loss = F.kl_div(probs_u1, targets_u, reduction='batchmean') 
+        # u1 loss - supervised loss for first strongly augmented data
+        logits_u2 = model(inputs_u2)
+        u1_loss = -torch.mean(torch.sum(F.log_softmax(logits_u2, dim=1) * targets_u, dim=1))
         loss += args.lambda_kl * u1_loss
 
         # Rotation Loss
