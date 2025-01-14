@@ -234,23 +234,10 @@ def train(labeled_trainloader, unlabeled_trainloader, model, optimizer, ema_opti
         # measure data loading time
         data_time.update(time.time() - end)
 
-        # batch_size = inputs_x.size(0)
-
-        # Transform label to one-hot
-        # targets_x = torch.zeros(batch_size, 10).scatter_(1, targets_x.view(-1,1).long(), 1)
         
         if use_cuda:
             inputs_x, targets_x = inputs_x.cuda(), targets_x.cuda(non_blocking=True)
             inputs_u = inputs_u.cuda()
-
-
-        # with torch.no_grad():
-        #     # compute guessed labels of unlabel samples
-        #     outputs_u = model(inputs_u1)
-        #     p = torch.softmax(outputs_u, dim=1)
-        #     pt = p**(1/args.T)
-        #     targets_u = pt / pt.sum(dim=1, keepdim=True)
-        #     targets_u = targets_u.detach()
 
         batch_size = inputs_x.size(0)
         all_inputs = torch.cat([inputs_x, inputs_u], dim=0)
@@ -263,7 +250,7 @@ def train(labeled_trainloader, unlabeled_trainloader, model, optimizer, ema_opti
         logits = interleave(logits, batch_size)
         logits_x = logits[0]
         logits_u_w = torch.cat(logits[1:], dim=0)
-        
+
         Lx = F.cross_entropy(logits_x, targets_x, reduction='mean')
 
         pseudo_label = torch.softmax(logits_u_w.detach()/args.T, dim=-1)
