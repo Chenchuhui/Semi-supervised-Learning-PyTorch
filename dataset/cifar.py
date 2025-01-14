@@ -176,14 +176,13 @@ def load_local_data(folder):
         labels = np.array(labels)
         return images, labels
 
-def get_cifar(args, alg, name, num_labels, num_classes, data_dir='./data', preload=False):
+def get_cifar(args, alg, name, num_labels, num_classes, data_dir='./data', preaug=False):
     data_dir = os.path.join(data_dir, name.lower())
     w_t, m_t, s_t, v_t = get_cifar_transforms(args)
     dset = getattr(torchvision.datasets, name.upper())
     dset = dset(data_dir, train=True, download=True)
     data, targets = dset.data, dset.targets
     data, targets = np.array(data), np.array(targets)
-    # data = transpose(data)
 
     train_labeled_idxs, train_unlabeled_idxs, val_idxs = train_val_split(targets, int(num_labels/10))
     lb_data, lb_targets, ulb_data, ulb_targets = data[train_labeled_idxs], targets[train_labeled_idxs], data[train_unlabeled_idxs], targets[train_unlabeled_idxs]
@@ -202,10 +201,10 @@ def get_cifar(args, alg, name, num_labels, num_classes, data_dir='./data', prelo
     # if alg == 'fullysupervised':
     #     lb_data = data
     #     lb_targets = targets
-    if preload:
-        lb_dset = PreAugBasicDataset(alg, lb_data, lb_targets, num_classes, w_t, m_t, s_t, False, False, batch_size=args.batch_size, iteration=args.train_iteration)
-        ulb_dset = PreAugBasicDataset(alg, ulb_data, ulb_targets, num_classes, w_t, m_t, s_t, True, False, batch_size=args.batch_size, iteration=args.train_iteration)
-        val_dset = PreAugBasicDataset(alg, val_data, val_targets, num_classes, v_t, None, None, False, False, batch_size=1, iteration=1)
+    if preaug:
+        lb_dset = PreAugBasicDataset(alg, lb_data, lb_targets, num_classes, w_t, m_t, s_t, False, False, batch_size=args.batch_size, iteration=args.train_iteration, rep=args.lb_rep)
+        ulb_dset = PreAugBasicDataset(alg, ulb_data, ulb_targets, num_classes, w_t, m_t, s_t, True, False, batch_size=args.batch_size, iteration=args.train_iteration, rep=args.ulb_rep)
+        val_dset = PreAugBasicDataset(alg, val_data, val_targets, num_classes, v_t, None, None, False, False, batch_size=1, iteration=1, rep=1)
 
     else:
         lb_dset = BasicDataset(alg, lb_data, lb_targets, num_classes, w_t, False, m_t, s_t, False)
@@ -221,50 +220,50 @@ def get_cifar(args, alg, name, num_labels, num_classes, data_dir='./data', prelo
 
     return lb_dset, ulb_dset, val_dset, test_dset
 
-def save_images(dataset, transform_fn, output_dir):
-    os.makedirs(output_dir, exist_ok=True)
+# def save_images(dataset, transform_fn, output_dir):
+#     os.makedirs(output_dir, exist_ok=True)
     
-    for i, (img, label) in enumerate(dataset):
-        transformed_img = transform_fn(img) if transform_fn is not None else img
-        save_path = os.path.join(output_dir, f"{label}_{i}.png")
-        cv2.imwrite(save_path, cv2.cvtColor(transformed_img.numpy().transpose(1, 2, 0) * 255, cv2.COLOR_RGB2BGR))
+#     for i, (img, label) in enumerate(dataset):
+#         transformed_img = transform_fn(img) if transform_fn is not None else img
+#         save_path = os.path.join(output_dir, f"{label}_{i}.png")
+#         cv2.imwrite(save_path, cv2.cvtColor(transformed_img.numpy().transpose(1, 2, 0) * 255, cv2.COLOR_RGB2BGR))
 
-# Execute this file if needs data preprocessing
-def main(name, data_dir='./data'):
-    # Define output directories
-    original_dir = "./data/augmented/original"
-    weak_dir1 = "./data/augmented/weak1"
-    weak_dir2 = "./data/augmented/weak2"
-    medium_dir = "./data/augmented/medium"
-    strong_dir1 = "./data/augmented/strong1"
-    strong_dir2 = "./data/augmented/strong2"
-    test_dir = "./data/augmented/test"
+# # Execute this file if needs data preprocessing
+# def main(name, data_dir='./data'):
+#     # Define output directories
+#     original_dir = "./data/augmented/original"
+#     weak_dir1 = "./data/augmented/weak1"
+#     weak_dir2 = "./data/augmented/weak2"
+#     medium_dir = "./data/augmented/medium"
+#     strong_dir1 = "./data/augmented/strong1"
+#     strong_dir2 = "./data/augmented/strong2"
+#     test_dir = "./data/augmented/test"
 
-    data_dir = os.path.join(data_dir, name.lower())
-    dataset = getattr(torchvision.datasets, name.upper())
-    dataset_train = dataset(data_dir, train=True, download=True)
-    dataset_test = dataset(data_dir, train=False, download=True)
-    class Args:
-        dataset = name
-        img_size = 32
-        crop_ratio = 0.875
-    args = Args()
-    weak_transform, medium_transform, strong_transform, ori_transform = preprocess_cifar_transforms(args)
+#     data_dir = os.path.join(data_dir, name.lower())
+#     dataset = getattr(torchvision.datasets, name.upper())
+#     dataset_train = dataset(data_dir, train=True, download=True)
+#     dataset_test = dataset(data_dir, train=False, download=True)
+#     class Args:
+#         dataset = name
+#         img_size = 32
+#         crop_ratio = 0.875
+#     args = Args()
+#     weak_transform, medium_transform, strong_transform, ori_transform = preprocess_cifar_transforms(args)
     
-    # Perform transformations and save images
-    print("Saving original...")
-    # save_images(dataset_train, ori_transform, original_dir)
+#     # Perform transformations and save images
+#     print("Saving original...")
+#     # save_images(dataset_train, ori_transform, original_dir)
 
-    print("Saving weak transformations...")
-    save_images(dataset_train, weak_transform, weak_dir1)
-    save_images(dataset_train, weak_transform, weak_dir2)
+#     print("Saving weak transformations...")
+#     save_images(dataset_train, weak_transform, weak_dir1)
+#     save_images(dataset_train, weak_transform, weak_dir2)
 
-    print("Saving medium transformations...")
-    save_images(dataset_train, medium_transform, medium_dir)
+#     print("Saving medium transformations...")
+#     save_images(dataset_train, medium_transform, medium_dir)
 
-    print("Saving strong transformations...")
-    save_images(dataset_train, strong_transform, strong_dir1)
-    save_images(dataset_train, strong_transform, strong_dir2)
+#     print("Saving strong transformations...")
+#     save_images(dataset_train, strong_transform, strong_dir1)
+#     save_images(dataset_train, strong_transform, strong_dir2)
 
-    print("Saving test...")
-    save_images(dataset_test, ori_transform, test_dir)
+#     print("Saving test...")
+#     save_images(dataset_test, ori_transform, test_dir)

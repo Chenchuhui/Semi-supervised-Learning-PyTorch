@@ -3,7 +3,7 @@
 
 import math
 import numpy as np 
-from collections import deque
+import random
 
 from PIL import Image
 import torchvision
@@ -32,6 +32,7 @@ class PreAugBasicDataset(Dataset):
                  s_transform=None,
                  is_ulb=False,
                  onehot=False,
+                 rep=None,
                  *args, 
                  **kwargs):
         """
@@ -43,6 +44,7 @@ class PreAugBasicDataset(Dataset):
             use_strong_transform: If True, this dataset returns both weakly and strongly augmented images.
             strong_transform: list of transformation functions for strong augmentation
             onehot: If True, label is converted into onehot vector.
+            rep: repetition for number of augmented images. If it is None, then calculate the estimated number of repetition in each epoch
         """
         super(PreAugBasicDataset, self).__init__()
         self.alg = alg
@@ -55,16 +57,20 @@ class PreAugBasicDataset(Dataset):
         self.num_classes = num_classes
         self.is_ulb = is_ulb
         self.onehot = onehot
-        self.augmentation_factor = math.ceil(kwargs['batch_size'] * kwargs['iteration'] / len(self.data))
+        self.augmentation_factor = math.ceil(kwargs['batch_size'] * kwargs['iteration'] / len(self.data)) if rep is None else rep
 
         # Data augmentation Now
         self.w_data, self.m_data, self.s_data = self.transform_data()
 
     def transform_data(self):
         print(self.augmentation_factor)
-        w_data_lst = [deque() for _ in range(len(self.data))]
-        m_data_lst = [deque() for _ in range(len(self.data))] if self.is_ulb else None
-        s_data_lst = [deque() for _ in range(len(self.data))] if self.is_ulb else None
+        # w_data_lst = [deque() for _ in range(len(self.data))]
+        # m_data_lst = [deque() for _ in range(len(self.data))] if self.is_ulb else None
+        # s_data_lst = [deque() for _ in range(len(self.data))] if self.is_ulb else None
+        w_data_lst = [[] for _ in range(len(self.data))]
+        m_data_lst = [[] for _ in range(len(self.data))] if self.is_ulb else None
+        s_data_lst = [[] for _ in range(len(self.data))] if self.is_ulb else None
+
 
         for i, img in enumerate(self.data):
             try:
@@ -81,6 +87,13 @@ class PreAugBasicDataset(Dataset):
                         for _ in range(self.augmentation_factor):
                             w_data_lst[i].append(self.w_transform(img))
                             s_data_lst[i].append(self.s_transform(img))
+                            s_data_lst[i].append(self.s_transform(img))
+                    elif self.alg == "psudolabel":
+                        for _ in range(self.augmentation_factor):
+                            w_data_lst[i].append(self.w_transform(img))
+                    else:
+                        for _ in range(self.augmentation_factor):
+                            w_data_lst[i].append(self.w_transform(img))
                             s_data_lst[i].append(self.s_transform(img))
             except Exception as e:
                 print(f"Error processing sample {i}: {e}")
@@ -104,38 +117,32 @@ class PreAugBasicDataset(Dataset):
             if isinstance(img, np.ndarray):
                 img = Image.fromarray(img)
             if self.w_data is not None and len(self.w_data[idx]) > 0:
-                img_w1 = self.w_data[idx].popleft()
-                self.w_data[idx].append(img_w1)  # Add it back to the end of the queue
+                img_w1 = random.choice(self.w_data[idx])
             else:
-                img_w1 = self.w_transform(img)
+                raise ValueError("First weakly augmented images are required")
             
             if self.w_data is not None and len(self.w_data[idx]) > 0:
-                img_w2 = self.w_data[idx].popleft()
-                self.w_data[idx].append(img_w2)  # Add it back to the end of the queue
+                img_w2 = random.choice(self.w_data[idx])
             else:
                 img_w2 = None
             
             if self.m_data is not None and len(self.m_data[idx]) > 0:
-                img_m = self.m_data[idx].popleft()
-                self.m_data[idx].append(img_m)  # Add it back to the end of the queue
+                img_m = random.choice(self.m_data[idx])
             else:
                 img_m = None
             
             if self.s_data is not None and len(self.s_data[idx]) > 0:
-                img_s1 = self.s_data[idx].popleft()
-                self.s_data[idx].append(img_s1)  # Add it back to the end of the queue
+                img_s1 = random.choice(self.s_data[idx])
             else:
                 img_s1 = None
             
             if self.s_data is not None and len(self.s_data[idx]) > 0:
-                img_s2 = self.s_data[idx].popleft()
-                self.s_data[idx].append(img_s2)  # Add it back to the end of the queue
+                img_s2 = random.choice(self.s_data[idx])
             else:
                 img_s2 = None
         except IndexError:
             raise Exception(f"Not enough augmented data for index {idx}. Increase `num_augmentations` or adjust batch size/iterations.")
         return img, img_w1, img_w2, img_m, img_s1, img_s2, target
-        # return img, target
 
     def __getitem__(self, idx):
         """
@@ -152,7 +159,7 @@ class PreAugBasicDataset(Dataset):
             if self.alg == 'fullysupervised' or self.alg == 'supervised':
                 return {'idx_ulb': idx}
             elif self.alg == 'pseudolabel' or self.alg == 'vat':
-                return {'idx_ulb': idx, 'x_ulb_w':img_w} 
+                return {'idx_ulb': idx, 'x_ulb_w':img_w1} 
             elif self.alg == 'pimodel' or self.alg == 'meanteacher' or self.alg == 'mixmatch':
                 # NOTE x_ulb_s here is weak augmentation
                 return {'idx_ulb': idx, 'x_ulb_w': img_w1, 'x_ulb_s': img_w2}
@@ -169,8 +176,6 @@ class PreAugBasicDataset(Dataset):
             elif self.alg == 'comatch':
                 return {'idx_ulb': idx, 'x_ulb_w': img_w, 'x_ulb_s_0': self.strong_transform(img), 'x_ulb_s_1':self.strong_transform(img)} 
             else:
-                img_w1 = self.transform(img_w1) if img_w1 is not None else None
-                img_s1 = self.transform(img_s1) if img_s1 is not None else None
                 return {'idx_ulb': idx, 'x_ulb_w': img_w1, 'x_ulb_s': img_s1} 
 
 
