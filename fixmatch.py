@@ -34,6 +34,15 @@ parser.add_argument('--batch-size', default=128, type=int, metavar='N',
 parser.add_argument('--lr', '--learning-rate', default=0.002, type=float,
                     metavar='LR', help='initial learning rate')
 parser.add_argument('--dataset', default='cifar10', type=str)
+
+# Preaug augmented data
+parser.add_argument('--preaug', action='store_true', 
+                    help='If set, use preprocessed augmented data to speed up training and better utilize GPU resources.')
+parser.add_argument('--lb-rep', type=int, default=None, 
+                    help='Number of repetitions for augmented labeled data (optional, valid only in preaug mode).')
+parser.add_argument('--ulb-rep', type=int, default=None, 
+                    help='Number of repetitions for augmented unlabeled data (optional, valid only in preaug mode).')
+
 # Checkpoints
 parser.add_argument('--resume', default='', type=str, metavar='PATH',
                     help='path to latest checkpoint (default: none)')
@@ -56,9 +65,11 @@ parser.add_argument('--train-iteration', type=int, default=512,
 parser.add_argument('--out', default='result',
                         help='Directory to output the result')
 parser.add_argument('--alpha', default=0.75, type=float)
+parser.add_argument('--mu', default=4, type=int,
+                        help='coefficient of unlabeled batch size')
+parser.add_argument('--threshold', default=0.95, type=float,
+                        help='pseudo label threshold')
 parser.add_argument('--lambda-u', default=75, type=float)
-parser.add_argument('--lambda-kl', default=0.5, type=float)
-parser.add_argument('--lambda-rot', default=0.5, type=float)
 parser.add_argument('--T', default=0.5, type=float)
 parser.add_argument('--ema-decay', default=0.999, type=float)
 
@@ -86,17 +97,17 @@ def main():
     # Data
     print(f'==> Preparing cifar10')
 
-    labeled_set, unlabeled_set, val_set, test_set = dataset.get_cifar(args, 'fixmatch', args.dataset, args.n_labeled, args.num_classes)    
+    labeled_set, unlabeled_set, val_set, test_set = dataset.get_cifar(args, 'fixmatch', args.dataset, args.n_labeled, args.num_classes, preaug=args.preaug)    
     labeled_trainloader = data.DataLoader(labeled_set, batch_size=args.batch_size, shuffle=True, num_workers=0, drop_last=True)
-    unlabeled_trainloader = data.DataLoader(unlabeled_set, batch_size=args.batch_size, shuffle=True, num_workers=0, drop_last=True)
+    unlabeled_trainloader = data.DataLoader(unlabeled_set, batch_size=args.batch_size*args.mu, shuffle=True, num_workers=0, drop_last=True)
     val_loader = data.DataLoader(val_set, batch_size=args.batch_size, shuffle=False, num_workers=0)
     test_loader = data.DataLoader(test_set, batch_size=args.batch_size, shuffle=False, num_workers=0)
 
     # Model
     print("==> creating WRN-28-2")
 
-    def create_model(ema=False, rotate=True):
-        model = models.WideResNet(num_classes=10, use_rot=rotate)
+    def create_model(ema=False):
+        model = models.WideResNet(num_classes=10)
         model = model.cuda()
 
         if ema:
@@ -182,6 +193,12 @@ def main():
     print('Mean acc:')
     print(np.mean(test_accs[-20:]))
 
+def linear_rampup(current, rampup_length=args.epochs):
+    if rampup_length == 0:
+        return 1.0
+    else:
+        current = np.clip(current / rampup_length, 0.0, 1.0)
+        return float(current)
 
 def train(labeled_trainloader, unlabeled_trainloader, model, optimizer, ema_optimizer, epoch, use_cuda):
 
@@ -222,10 +239,10 @@ def train(labeled_trainloader, unlabeled_trainloader, model, optimizer, ema_opti
         # measure data loading time
         data_time.update(time.time() - end)
 
-        batch_size = inputs_x.size(0)
+        # batch_size = inputs_x.size(0)
 
         # Transform label to one-hot
-        targets_x = torch.zeros(batch_size, 10).scatter_(1, targets_x.view(-1,1).long(), 1)
+        # targets_x = torch.zeros(batch_size, 10).scatter_(1, targets_x.view(-1,1).long(), 1)
         
         if use_cuda:
             inputs_x, targets_x = inputs_x.cuda(), targets_x.cuda(non_blocking=True)
@@ -233,19 +250,18 @@ def train(labeled_trainloader, unlabeled_trainloader, model, optimizer, ema_opti
             inputs_u2 = inputs_u2.cuda()
 
 
-        with torch.no_grad():
-            # compute guessed labels of unlabel samples
-            outputs_u = model(inputs_u1)
-            p = torch.softmax(outputs_u, dim=1)
-            pt = p**(1/args.T)
-            targets_u = pt / pt.sum(dim=1, keepdim=True)
-            targets_u = targets_u.detach()
+        # with torch.no_grad():
+        #     # compute guessed labels of unlabel samples
+        #     outputs_u = model(inputs_u1)
+        #     p = torch.softmax(outputs_u, dim=1)
+        #     pt = p**(1/args.T)
+        #     targets_u = pt / pt.sum(dim=1, keepdim=True)
+        #     targets_u = targets_u.detach()
 
 
         batch_size = inputs_x.shape[0]
         inputs = interleave(
-            torch.cat((inputs_x, inputs_u1, inputs_u2)), 2*args.mu+1).to(args.device)
-        targets_x = targets_x.to(args.device)
+            torch.cat((inputs_x, inputs_u1, inputs_u2)), 2*args.mu+1)
         logits = model(inputs)
         logits = de_interleave(logits, 2*args.mu+1)
         logits_x = logits[:batch_size]
@@ -260,11 +276,9 @@ def train(labeled_trainloader, unlabeled_trainloader, model, optimizer, ema_opti
 
         Lu = (F.cross_entropy(logits_u_s, targets_u,
                                 reduction='none') * mask).mean()
-
-        loss = Lx + args.lambda_u * Lu
-
-        loss.backward()
         
+        loss = Lx + args.lambda_u * linear_rampup(epoch) * Lu
+
         # record loss
         losses.update(loss.item(), inputs_x.size(0))
         losses_x.update(Lx.item(), inputs_x.size(0))
@@ -272,6 +286,7 @@ def train(labeled_trainloader, unlabeled_trainloader, model, optimizer, ema_opti
 
         # compute gradient and do SGD step
         optimizer.zero_grad()
+        loss.backward()
         optimizer.step()
         ema_optimizer.step()
 
@@ -281,7 +296,7 @@ def train(labeled_trainloader, unlabeled_trainloader, model, optimizer, ema_opti
         mask_probs.update(mask.mean().item())
 
         # plot progress
-        bar.suffix  = '({batch}/{size}) Data: {data:.3f}s | Batch: {bt:.3f}s | Total: {total:} | ETA: {eta:} | Loss: {loss:.4f} | Loss_x: {loss_x:.4f} | Loss_u: {loss_u:.4f} | W: {w:.4f}'.format(
+        bar.suffix  = '({batch}/{size}) Data: {data:.3f}s | Batch: {bt:.3f}s | Total: {total:} | ETA: {eta:} | Loss: {loss:.4f} | Loss_x: {loss_x:.4f} | Loss_u: {loss_u:.4f} | Mask: {mask:.4f}'.format(
                     batch=batch_idx + 1,
                     size=args.train_iteration,
                     data=data_time.avg,
@@ -377,28 +392,14 @@ class WeightEMA(object):
                 # customized weight decay
                 param.mul_(1 - self.wd)
 
+def interleave(x, size):
+    s = list(x.shape)
+    return x.reshape([-1, size] + s[1:]).transpose(0, 1).reshape([-1] + s[1:])
+
+
 def de_interleave(x, size):
     s = list(x.shape)
     return x.reshape([size, -1] + s[1:]).transpose(0, 1).reshape([-1] + s[1:])
-
-def interleave_offsets(batch, nu):
-    groups = [batch // (nu + 1)] * (nu + 1)
-    for x in range(batch - sum(groups)):
-        groups[-x - 1] += 1
-    offsets = [0]
-    for g in groups:
-        offsets.append(offsets[-1] + g)
-    assert offsets[-1] == batch
-    return offsets
-
-
-def interleave(xy, batch):
-    nu = len(xy) - 1
-    offsets = interleave_offsets(batch, nu)
-    xy = [[v[offsets[p]:offsets[p + 1]] for p in range(nu + 1)] for v in xy]
-    for i in range(1, nu + 1):
-        xy[0][i], xy[i][i] = xy[i][i], xy[0][i]
-    return [torch.cat(v, dim=0) for v in xy]
 
 if __name__ == '__main__':
     main()
