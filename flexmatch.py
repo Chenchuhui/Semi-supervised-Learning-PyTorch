@@ -5,7 +5,7 @@ import os
 import random
 import shutil
 import time
-from collections import OrderedDict
+from collections import OrderedDict, Counter
 
 import dataset.cifar as dataset
 
@@ -66,9 +66,13 @@ def de_interleave(x, size):
     s = list(x.shape)
     return x.reshape([size, -1] + s[1:]).transpose(0, 1).reshape([-1] + s[1:])
 
+def mapping_func(mode='convex'):
+    """Returnt he Mapping func."""
+    if mode == 'convex':
+        return lambda x: x / (2 - x)
 
 def main():
-    parser = argparse.ArgumentParser(description='PyTorch FixMatch Training')
+    parser = argparse.ArgumentParser(description='PyTorch FlexMatch Training')
     parser.add_argument('--gpu-id', default='0', type=int,
                         help='id(s) for CUDA_VISIBLE_DEVICES')
     parser.add_argument('--num-workers', type=int, default=4,
@@ -85,11 +89,11 @@ def main():
                         help='dataset name')
     parser.add_argument('--total-steps', default=262144, type=int,
                         help='number of total steps to run')
-    parser.add_argument('--train-iteration', default=1024, type=int,
+    parser.add_argument('--train-iteration', default=256, type=int,
                         help='number of eval steps to run')
     parser.add_argument('--start-epoch', default=0, type=int,
                         help='manual epoch number (useful on restarts)')
-    parser.add_argument('--batch-size', default=64, type=int,
+    parser.add_argument('--batch-size', default=256, type=int,
                         help='train batchsize')
     parser.add_argument('--lr', '--learning-rate', default=0.03, type=float,
                         help='initial learning rate')
@@ -103,7 +107,7 @@ def main():
                         help='use EMA model')
     parser.add_argument('--ema-decay', default=0.999, type=float,
                         help='EMA decay rate')
-    parser.add_argument('--mu', default=7, type=int,
+    parser.add_argument('--mu', default=2, type=int,
                         help='coefficient of unlabeled batch size')
     parser.add_argument('--lambda-u', default=1, type=float,
                         help='coefficient of unlabeled loss')
@@ -284,13 +288,16 @@ def main():
         f"  Total train batch size = {args.batch_size*args.world_size}")
     logger.info(f"  Total optimization steps = {args.total_steps}")
 
+    learning_status = [-1] * len(unlabeled_trainloader.dataset.indices)
+    mapping = mapping_func()
+    
     model.zero_grad()
     train(args, labeled_trainloader, unlabeled_trainloader, test_loader,
-          model, optimizer, ema_model, scheduler, log)
+          model, optimizer, ema_model, scheduler, log, learning_status, mapping)
 
 
 def train(args, labeled_trainloader, unlabeled_trainloader, test_loader,
-          model, optimizer, ema_model, scheduler, log):
+          model, optimizer, ema_model, scheduler, log, learning_status, mapping):
     if args.amp:
         from apex import amp
     global best_acc
@@ -305,6 +312,7 @@ def train(args, labeled_trainloader, unlabeled_trainloader, test_loader,
 
     labeled_iter = iter(labeled_trainloader)
     unlabeled_iter = iter(unlabeled_trainloader)
+    N = len(learning_status) # Number of unlabeled data
 
     model.train()
     for epoch in range(args.start_epoch, args.epochs):
@@ -344,6 +352,7 @@ def train(args, labeled_trainloader, unlabeled_trainloader, test_loader,
                 (inputs_u_w, inputs_u_s), _ = next(unlabeled_iter)
 
             data_time.update(time.time() - end)
+            cls_thresholds = torch.zeros(args.num_classes, device=args.device)
             batch_size = inputs_x.shape[0]
             inputs = interleave(
                 torch.cat((inputs_x, inputs_u_w, inputs_u_s)), 2*args.mu+1).to(args.device)
@@ -356,9 +365,35 @@ def train(args, labeled_trainloader, unlabeled_trainloader, test_loader,
 
             Lx = F.cross_entropy(logits_x, targets_x, reduction='mean')
 
+            # Compute a learning status
+            counter = Counter(learning_status)
+
+            num_unused = counter[-1]
+            if num_unused != N:
+                max_counter = max([counter[c] for c in range(args.num_classes)])
+                if max_counter < num_unused:
+                    sum_counter = sum([counter[c] for c in range(args.num_classes)])
+                    denominator = max(max_counter, N - sum_counter)
+                else:
+                    denominator = max_counter
+                
+                # threshold per class
+                for c in range(args.num_classes):
+                    beta = counter[c] / denominator
+                    cls_thresholds[c] = mapping(beta) * args.threshold
+
             pseudo_label = torch.softmax(logits_u_w.detach()/args.T, dim=-1)
             max_probs, targets_u = torch.max(pseudo_label, dim=-1)
-            mask = max_probs.ge(args.threshold).float()
+            over_threshold = max_probs > args.threshold
+            if over_threshold.any():
+                u_i = u_i.to(args.device)
+                sample_index = u_i[over_threshold].tolist()
+                pseudo_label = targets_u[over_threshold].tolist()
+                for i, l in zip(sample_index, pseudo_label):
+                    learning_status[i] = l
+            
+            batch_threshold = torch.index_select(cls_thresholds, 0, targets_u)
+            mask = max_probs >= batch_threshold
 
             Lu = (F.cross_entropy(logits_u_s, targets_u,
                                   reduction='none') * mask).mean()

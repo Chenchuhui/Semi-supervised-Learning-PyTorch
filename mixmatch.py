@@ -18,7 +18,7 @@ import torchvision.transforms as transforms
 import torch.nn.functional as F
 
 import models.wideresnet as models
-import dataset.cifar as dataset
+from dataset.svhn import DATASET_GETTERS
 from utils import Bar, Logger, AverageMeter, accuracy, mkdir_p, savefig
 from tensorboardX import SummaryWriter
 
@@ -28,15 +28,20 @@ parser.add_argument('--epochs', default=1024, type=int, metavar='N',
                     help='number of total epochs to run')
 parser.add_argument('--start-epoch', default=0, type=int, metavar='N',
                     help='manual epoch number (useful on restarts)')
-parser.add_argument('--batch-size', default=128, type=int, metavar='N',
+parser.add_argument('--batch-size', default=256, type=int, metavar='N',
                     help='train batchsize')
 parser.add_argument('--lr', '--learning-rate', default=0.002, type=float,
                     metavar='LR', help='initial learning rate')
-parser.add_argument('--dataset', default='cifar10', type=str)
+parser.add_argument('--dataset', default='svhn', type=str)
+parser.add_argument('--num-workers', type=int, default=4,
+                        help='number of workers')
 
 # Preload augmented data
-parser.add_argument('--preload', default=False, type=bool, 
-                    help='Define if the data is from preprocessed augmented data. If true it may speed up training speed and fully utilize the GPU')
+parser.add_argument('--preaug', action='store_true', 
+                    help='If set, use preprocessed augmented data to speed up training and better utilize GPU resources.')
+parser.add_argument('--rep', type=int, default=1, 
+                    help='Repetition Index. Number of repetitive augmentations of the same image (optional, valid only in preaug mode).')
+
 # Checkpoints
 parser.add_argument('--resume', default='', type=str, metavar='PATH',
                     help='path to latest checkpoint (default: none)')
@@ -46,15 +51,15 @@ parser.add_argument('--manualSeed', type=int, default=0, help='manual seed')
 parser.add_argument('--gpu', default='0', type=str,
                     help='id(s) for CUDA_VISIBLE_DEVICES')
 #Method options
-parser.add_argument('--n-labeled', type=int, default=250,
+parser.add_argument('--num-labeled', type=int, default=250,
                         help='Number of labeled data')
-parser.add_argument('--num-classes', type=int, default=10,
-                        help='Number of classes, default 10 for cifar10')
+parser.add_argument("--expand-labels", action="store_true",
+                        help="expand labels to fit eval steps")
 parser.add_argument('--img-size', type=int, default=32,
                         help='Image Size')
 parser.add_argument('--crop-ratio', type=float, default=0.875,
                         help='Crop Ratio')
-parser.add_argument('--train-iteration', type=int, default=512,
+parser.add_argument('--train-iteration', type=int, default=256,
                         help='Number of iteration per epoch')
 parser.add_argument('--out', default='result',
                         help='Directory to output the result')
@@ -85,19 +90,43 @@ def main():
         mkdir_p(args.out)
 
     # Data
-    print(f'==> Preparing cifar10')
+    # print(f'==> Preparing cifar10')
+    if args.dataset == 'cifar10':
+        args.num_classes = 10
+        args.model_depth = 28
+        args.model_width = 2
+        # elif args.arch == 'resnext':
+        #     args.model_cardinality = 4
+        #     args.model_depth = 28
+        #     args.model_width = 4
 
-    labeled_set, unlabeled_set, val_set, test_set = dataset.get_cifar(args, 'mixmatch', args.dataset, args.n_labeled, args.num_classes, preload=args.preload)
-    labeled_trainloader = data.DataLoader(labeled_set, batch_size=args.batch_size, shuffle=True, num_workers=0, drop_last=True)
-    unlabeled_trainloader = data.DataLoader(unlabeled_set, batch_size=args.batch_size, shuffle=True, num_workers=0, drop_last=True)
-    val_loader = data.DataLoader(val_set, batch_size=args.batch_size, shuffle=False, num_workers=0)
-    test_loader = data.DataLoader(test_set, batch_size=args.batch_size, shuffle=False, num_workers=0)
+    elif args.dataset == 'cifar100':
+        args.num_classes = 100
+        args.model_depth = 28
+        args.model_width = 8
+        # elif args.arch == 'resnext':
+        #     args.model_cardinality = 8
+        #     args.model_depth = 29
+        #     args.model_width = 64
+    elif args.dataset == 'svhn':
+        args.num_classes = 10
+        args.model_depth = 28
+        args.model_width = 2
+
+    labeled_set, unlabeled_set, val_set, test_set = DATASET_GETTERS[args.dataset](
+        args, './data') 
+    labeled_subset = data.Subset(labeled_set, range(args.num_labeled))
+    labeled_trainloader = data.DataLoader(labeled_set, batch_size=args.batch_size, shuffle=True, num_workers=args.num_workers, drop_last=True)
+    train_eval_loader = data.DataLoader(labeled_subset, batch_size=args.num_labeled, shuffle=False, num_workers=args.num_workers)
+    unlabeled_trainloader = data.DataLoader(unlabeled_set, batch_size=args.batch_size, shuffle=True, num_workers=args.num_workers, drop_last=True)
+    val_loader = data.DataLoader(val_set, batch_size=args.batch_size, shuffle=False, num_workers=args.num_workers)
+    test_loader = data.DataLoader(test_set, batch_size=args.batch_size, shuffle=False, num_workers=args.num_workers)
 
     # Model
     print("==> creating WRN-28-2")
 
     def create_model(ema=False):
-        model = models.WideResNet(num_classes=10)
+        model = models.WideResNet(num_classes=args.num_classes, depth=args.model_depth, widen_factor=args.model_width)
         model = model.cuda()
 
         if ema:
@@ -146,7 +175,7 @@ def main():
         print('\nEpoch: [%d | %d] LR: %f' % (epoch + 1, args.epochs, state['lr']))
 
         train_loss, train_loss_x, train_loss_u = train(labeled_trainloader, unlabeled_trainloader, model, optimizer, ema_optimizer, train_criterion, epoch, use_cuda)
-        _, train_acc = validate(labeled_trainloader, ema_model, criterion, epoch, use_cuda, mode='Train Stats')
+        _, train_acc = validate(train_eval_loader, ema_model, criterion, epoch, use_cuda, mode='Train Stats')
         val_loss, val_acc = validate(val_loader, ema_model, criterion, epoch, use_cuda, mode='Valid Stats')
         test_loss, test_acc = validate(test_loader, ema_model, criterion, epoch, use_cuda, mode='Test Stats ')
 
@@ -202,24 +231,16 @@ def train(labeled_trainloader, unlabeled_trainloader, model, optimizer, ema_opti
     model.train()
     for batch_idx in range(args.train_iteration):
         try:
-            x = next(labeled_train_iter)
-            inputs_x = x['x_lb']
-            targets_x = x['y_lb']
+            inputs_x, targets_x = next(labeled_train_iter)
         except:
+            print("labeled data exhausted")
             labeled_train_iter = iter(labeled_trainloader)
-            x = next(labeled_train_iter)
-            inputs_x = x['x_lb']
-            targets_x = x['y_lb']
-
+            inputs_x, targets_x = next(labeled_train_iter)
         try:
-            u = next(unlabeled_train_iter)
-            inputs_u = u['x_ulb_w']
-            inputs_u2 = u['x_ulb_s']
+            (inputs_u, inputs_u2), _ = next(unlabeled_train_iter)
         except:
             unlabeled_train_iter = iter(unlabeled_trainloader)
-            u = next(unlabeled_train_iter)
-            inputs_u = u['x_ulb_w']
-            inputs_u2 = u['x_ulb_s']
+            (inputs_u, inputs_u2), _ = next(unlabeled_train_iter)
 
         # measure data loading time
         data_time.update(time.time() - end)
@@ -327,8 +348,7 @@ def validate(valloader, model, criterion, epoch, use_cuda, mode):
     bar = Bar(f'{mode}', max=len(valloader))
     with torch.no_grad():
         for batch_idx, batch in enumerate(valloader):
-            inputs = batch['x_lb']
-            targets = batch['y_lb']
+            inputs, targets = batch
             # measure data loading time
             data_time.update(time.time() - end)
 
