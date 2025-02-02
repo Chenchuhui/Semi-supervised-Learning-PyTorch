@@ -32,7 +32,7 @@ parser.add_argument('--batch-size', default=256, type=int, metavar='N',
                     help='train batchsize')
 parser.add_argument('--lr', '--learning-rate', default=0.002, type=float,
                     metavar='LR', help='initial learning rate')
-parser.add_argument('--dataset', default='svhn', type=str)
+parser.add_argument('--dataset', default='cifar10', type=str)
 parser.add_argument('--num-workers', type=int, default=4,
                         help='number of workers')
 
@@ -113,13 +113,12 @@ def main():
         args.model_depth = 28
         args.model_width = 2
 
-    labeled_set, unlabeled_set, val_set, test_set = DATASET_GETTERS[args.dataset](
+    labeled_set, unlabeled_set, test_set = DATASET_GETTERS[args.dataset](
         args, './data') 
     labeled_subset = data.Subset(labeled_set, range(args.num_labeled))
     labeled_trainloader = data.DataLoader(labeled_set, batch_size=args.batch_size, shuffle=True, num_workers=args.num_workers, drop_last=True)
     train_eval_loader = data.DataLoader(labeled_subset, batch_size=args.num_labeled, shuffle=False, num_workers=args.num_workers)
     unlabeled_trainloader = data.DataLoader(unlabeled_set, batch_size=args.batch_size, shuffle=True, num_workers=args.num_workers, drop_last=True)
-    val_loader = data.DataLoader(val_set, batch_size=args.batch_size, shuffle=False, num_workers=args.num_workers)
     test_loader = data.DataLoader(test_set, batch_size=args.batch_size, shuffle=False, num_workers=args.num_workers)
 
     # Model
@@ -164,7 +163,7 @@ def main():
         logger = Logger(os.path.join(args.out, 'log.txt'), title=title, resume=True)
     else:
         logger = Logger(os.path.join(args.out, 'log.txt'), title=title)
-        logger.set_names(['Train Loss', 'Train Loss X', 'Train Loss U',  'Valid Loss', 'Valid Acc.', 'Test Loss', 'Test Acc.'])
+        logger.set_names(['Train Loss', 'Train Loss X', 'Train Loss U',  'Test Loss', 'Test Acc.'])
 
     writer = SummaryWriter(args.out)
     step = 0
@@ -176,30 +175,27 @@ def main():
 
         train_loss, train_loss_x, train_loss_u = train(labeled_trainloader, unlabeled_trainloader, model, optimizer, ema_optimizer, train_criterion, epoch, use_cuda)
         _, train_acc = validate(train_eval_loader, ema_model, criterion, epoch, use_cuda, mode='Train Stats')
-        val_loss, val_acc = validate(val_loader, ema_model, criterion, epoch, use_cuda, mode='Valid Stats')
         test_loss, test_acc = validate(test_loader, ema_model, criterion, epoch, use_cuda, mode='Test Stats ')
 
         step = args.train_iteration * (epoch + 1)
 
         writer.add_scalar('losses/train_loss', train_loss, step)
-        writer.add_scalar('losses/valid_loss', val_loss, step)
         writer.add_scalar('losses/test_loss', test_loss, step)
 
         writer.add_scalar('accuracy/train_acc', train_acc, step)
-        writer.add_scalar('accuracy/val_acc', val_acc, step)
         writer.add_scalar('accuracy/test_acc', test_acc, step)
 
         # append logger file
-        logger.append([train_loss, train_loss_x, train_loss_u, val_loss, val_acc, test_loss, test_acc])
+        logger.append([train_loss, train_loss_x, train_loss_u, test_loss, test_acc])
 
         # save model
-        is_best = val_acc > best_acc
-        best_acc = max(val_acc, best_acc)
+        is_best = test_acc > best_acc
+        best_acc = max(test_acc, best_acc)
         save_checkpoint({
                 'epoch': epoch + 1,
                 'state_dict': model.state_dict(),
                 'ema_state_dict': ema_model.state_dict(),
-                'acc': val_acc,
+                'acc': test_acc,
                 'best_acc': best_acc,
                 'optimizer' : optimizer.state_dict(),
             }, is_best)

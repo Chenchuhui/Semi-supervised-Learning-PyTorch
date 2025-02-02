@@ -16,7 +16,7 @@ import torch.optim as optim
 from torch.optim.lr_scheduler import LambdaLR
 from torch.utils.data import DataLoader, RandomSampler, SequentialSampler
 from torch.utils.data.distributed import DistributedSampler
-from torch.utils.tensorboard import SummaryWriter
+from tensorboardX import SummaryWriter
 from tqdm import tqdm
 
 from dataset.cifar import DATASET_GETTERS
@@ -87,13 +87,13 @@ def main():
     parser.add_argument('--arch', default='wideresnet', type=str,
                         choices=['wideresnet', 'resnext'],
                         help='dataset name')
-    parser.add_argument('--total-steps', default=262144, type=int,
+    parser.add_argument('--total-steps', default=2**20, type=int,
                         help='number of total steps to run')
-    parser.add_argument('--train-iteration', default=256, type=int,
+    parser.add_argument('--train-iteration', default=1024, type=int,
                         help='number of eval steps to run')
     parser.add_argument('--start-epoch', default=0, type=int,
                         help='manual epoch number (useful on restarts)')
-    parser.add_argument('--batch-size', default=256, type=int,
+    parser.add_argument('--batch-size', default=64, type=int,
                         help='train batchsize')
     parser.add_argument('--lr', '--learning-rate', default=0.03, type=float,
                         help='initial learning rate')
@@ -107,7 +107,7 @@ def main():
                         help='use EMA model')
     parser.add_argument('--ema-decay', default=0.999, type=float,
                         help='EMA decay rate')
-    parser.add_argument('--mu', default=2, type=int,
+    parser.add_argument('--mu', default=7, type=int,
                         help='coefficient of unlabeled batch size')
     parser.add_argument('--lambda-u', default=1, type=float,
                         help='coefficient of unlabeled loss')
@@ -211,12 +211,11 @@ def main():
     if args.local_rank not in [-1, 0]:
         torch.distributed.barrier()
 
-    labeled_dataset, unlabeled_dataset, val_dataset, test_dataset = DATASET_GETTERS[args.dataset](
+    labeled_dataset, unlabeled_dataset, test_dataset = DATASET_GETTERS[args.dataset](
         args, './data')
     # labeled_set, unlabeled_set, val_set, test_set = dataset.get_cifar(args, 'fixmatch', args.dataset, args.num_labeled, args.num_classes, preaug=False)    
     labeled_trainloader = DataLoader(labeled_dataset, batch_size=args.batch_size, shuffle=True, num_workers=args.num_workers, drop_last=True)
     unlabeled_trainloader = DataLoader(unlabeled_dataset, batch_size=args.batch_size*args.mu, shuffle=True, num_workers=args.num_workers, drop_last=True)
-    val_loader = DataLoader(val_dataset, batch_size=args.batch_size, shuffle=False, num_workers=0)
     test_loader = DataLoader(test_dataset, batch_size=args.batch_size, shuffle=False, num_workers=0)
 
     if args.local_rank == 0:
@@ -288,7 +287,7 @@ def main():
         f"  Total train batch size = {args.batch_size*args.world_size}")
     logger.info(f"  Total optimization steps = {args.total_steps}")
 
-    learning_status = [-1] * len(unlabeled_trainloader.dataset.indices)
+    learning_status = [-1] * len(unlabeled_trainloader.dataset)
     mapping = mapping_func()
     
     model.zero_grad()
@@ -327,7 +326,7 @@ def train(args, labeled_trainloader, unlabeled_trainloader, test_loader,
                          disable=args.local_rank not in [-1, 0])
         for batch_idx in range(args.train_iteration):
             try:
-                inputs_x, targets_x = next(labeled_iter)
+                inputs_x, targets_x, _ = next(labeled_iter)
                 # error occurs ↓
                 # inputs_x, targets_x = next(labeled_iter)
             except:
@@ -335,12 +334,12 @@ def train(args, labeled_trainloader, unlabeled_trainloader, test_loader,
                     labeled_epoch += 1
                     labeled_trainloader.sampler.set_epoch(labeled_epoch)
                 labeled_iter = iter(labeled_trainloader)
-                inputs_x, targets_x = next(labeled_iter)
+                inputs_x, targets_x, _ = next(labeled_iter)
                 # error occurs ↓
                 # inputs_x, targets_x = next(labeled_iter)
 
             try:
-                (inputs_u_w, inputs_u_s), _ = next(unlabeled_iter)
+                (inputs_u_w, inputs_u_s), _, u_i = next(unlabeled_iter)
                 # error occurs ↓
                 # (inputs_u_w, inputs_u_s), _ = next(unlabeled_iter)
             except:
@@ -349,7 +348,7 @@ def train(args, labeled_trainloader, unlabeled_trainloader, test_loader,
                     unlabeled_epoch += 1
                     unlabeled_trainloader.sampler.set_epoch(unlabeled_epoch)
                 unlabeled_iter = iter(unlabeled_trainloader)
-                (inputs_u_w, inputs_u_s), _ = next(unlabeled_iter)
+                (inputs_u_w, inputs_u_s), _, u_i = next(unlabeled_iter)
 
             data_time.update(time.time() - end)
             cls_thresholds = torch.zeros(args.num_classes, device=args.device)
@@ -417,7 +416,7 @@ def train(args, labeled_trainloader, unlabeled_trainloader, test_loader,
 
             batch_time.update(time.time() - end)
             end = time.time()
-            mask_probs.update(mask.mean().item())
+            mask_probs.update(torch.mean(mask.float()).item())
             if not args.no_progress:
                 p_bar.set_description("Train Epoch: {epoch}/{epochs:4}. Iter: {batch:4}/{iter:4}. LR: {lr:.4f}. Data: {data:.3f}s. Batch: {bt:.3f}s. Loss: {loss:.4f}. Loss_x: {loss_x:.4f}. Loss_u: {loss_u:.4f}. Mask: {mask:.2f}. ".format(
                     epoch=epoch + 1,

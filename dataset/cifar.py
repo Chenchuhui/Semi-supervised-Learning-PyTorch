@@ -34,7 +34,7 @@ def get_cifar10(args, root):
     ])
     base_dataset = datasets.CIFAR10(root, train=True, download=True)
 
-    train_labeled_idxs, train_unlabeled_idxs, val_idxs = x_u_split(
+    train_labeled_idxs, train_unlabeled_idxs = x_u_split(
         args, base_dataset.targets)
 
     if not args.preaug:
@@ -55,15 +55,11 @@ def get_cifar10(args, root):
         train_unlabeled_dataset = CIFAR10SSLPreaug(
             root, train_unlabeled_idxs, is_ulb=True, batch_size=args.batch_size, iteration=args.train_iteration, rep=args.rep, train=True,
             transform=UnlabeledTransform(mean=cifar10_mean, std=cifar10_std, crop_size=args.img_size, crop_ratio=args.crop_ratio))
-    
-    val_dataset = CIFAR10SSL(
-        root, val_idxs, train=True,
-        transform=transform_val)
 
     test_dataset = datasets.CIFAR10(
         root, train=False, transform=transform_val, download=False)
 
-    return train_labeled_dataset, train_unlabeled_dataset, val_dataset, test_dataset
+    return train_labeled_dataset, train_unlabeled_dataset, test_dataset
 
 
 def get_cifar100(args, root):
@@ -103,28 +99,18 @@ def get_cifar100(args, root):
 
     return train_labeled_dataset, train_unlabeled_dataset, val_dataset, test_dataset
 
-
-def x_u_split(args, labels, split=0.1):
+def x_u_split(args, labels):
     label_per_class = args.num_labeled // args.num_classes
     labels = np.array(labels)
-    val_per_class = int(len(labels)*split) // args.num_classes
     labeled_idx = []
-    val_idx = []
     # unlabeled data: all data (https://github.com/kekmodel/FixMatch-pytorch/issues/10)
     unlabeled_idx = np.array(range(len(labels)))
     for i in range(args.num_classes):
         idx = np.where(labels == i)[0]
-        l_idx = np.random.choice(idx, label_per_class, False)
-        remaining_idx = np.setdiff1d(idx, l_idx)
-        v_idx = np.random.choice(remaining_idx, val_per_class, False)
-        labeled_idx.extend(l_idx)
-        val_idx.extend(v_idx)
+        idx = np.random.choice(idx, label_per_class, False)
+        labeled_idx.extend(idx)
     labeled_idx = np.array(labeled_idx)
-    val_idx = np.array(val_idx)
     assert len(labeled_idx) == args.num_labeled
-    assert len(val_idx) == len(labels)*split
-
-    unlabeled_idx = np.setdiff1d(unlabeled_idx, np.hstack([val_idx]))
 
     if args.expand_labels or args.num_labeled < args.batch_size:
         num_expand_x = math.ceil(
@@ -135,7 +121,7 @@ def x_u_split(args, labels, split=0.1):
         unlabeled_idx = np.hstack([unlabeled_idx for _ in range(num_expand_ulb_x)])
     np.random.shuffle(labeled_idx)
     np.random.shuffle(unlabeled_idx)
-    return labeled_idx, unlabeled_idx, val_idx
+    return labeled_idx, unlabeled_idx
 
 
 class UnlabeledTransform(object):
@@ -183,7 +169,7 @@ class CIFAR10SSL(datasets.CIFAR10):
         if self.target_transform is not None:
             target = self.target_transform(target)
 
-        return img, target
+        return img, target, index
 
 class CIFAR10SSLPreaug(datasets.CIFAR10):
     def __init__(self, root, indexs, is_ulb, batch_size, iteration, 

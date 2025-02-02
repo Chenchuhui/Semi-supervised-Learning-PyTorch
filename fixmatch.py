@@ -16,7 +16,7 @@ import torch.optim as optim
 from torch.optim.lr_scheduler import LambdaLR
 from torch.utils.data import DataLoader, RandomSampler, SequentialSampler
 from torch.utils.data.distributed import DistributedSampler
-from torch.utils.tensorboard import SummaryWriter
+from tensorboardX import SummaryWriter
 from tqdm import tqdm
 
 from dataset.cifar import DATASET_GETTERS
@@ -83,7 +83,7 @@ def main():
     parser.add_argument('--arch', default='wideresnet', type=str,
                         choices=['wideresnet', 'resnext'],
                         help='dataset name')
-    parser.add_argument('--total-steps', default=262144, type=int,
+    parser.add_argument('--total-steps', default=10**20, type=int,
                         help='number of total steps to run')
     parser.add_argument('--train-iteration', default=1024, type=int,
                         help='number of eval steps to run')
@@ -207,12 +207,11 @@ def main():
     if args.local_rank not in [-1, 0]:
         torch.distributed.barrier()
 
-    labeled_dataset, unlabeled_dataset, val_dataset, test_dataset = DATASET_GETTERS[args.dataset](
+    labeled_dataset, unlabeled_dataset, test_dataset = DATASET_GETTERS[args.dataset](
         args, './data')
     # labeled_set, unlabeled_set, val_set, test_set = dataset.get_cifar(args, 'fixmatch', args.dataset, args.num_labeled, args.num_classes, preaug=False)    
     labeled_trainloader = DataLoader(labeled_dataset, batch_size=args.batch_size, shuffle=True, num_workers=args.num_workers, drop_last=True)
     unlabeled_trainloader = DataLoader(unlabeled_dataset, batch_size=args.batch_size*args.mu, shuffle=True, num_workers=args.num_workers, drop_last=True)
-    val_loader = DataLoader(val_dataset, batch_size=args.batch_size, shuffle=False, num_workers=0)
     test_loader = DataLoader(test_dataset, batch_size=args.batch_size, shuffle=False, num_workers=0)
 
     if args.local_rank == 0:
@@ -319,7 +318,7 @@ def train(args, labeled_trainloader, unlabeled_trainloader, test_loader,
                          disable=args.local_rank not in [-1, 0])
         for batch_idx in range(args.train_iteration):
             try:
-                inputs_x, targets_x = next(labeled_iter)
+                inputs_x, targets_x, _ = next(labeled_iter)
                 # error occurs ↓
                 # inputs_x, targets_x = next(labeled_iter)
             except:
@@ -327,12 +326,12 @@ def train(args, labeled_trainloader, unlabeled_trainloader, test_loader,
                     labeled_epoch += 1
                     labeled_trainloader.sampler.set_epoch(labeled_epoch)
                 labeled_iter = iter(labeled_trainloader)
-                inputs_x, targets_x = next(labeled_iter)
+                inputs_x, targets_x, _ = next(labeled_iter)
                 # error occurs ↓
                 # inputs_x, targets_x = next(labeled_iter)
 
             try:
-                (inputs_u_w, inputs_u_s), _ = next(unlabeled_iter)
+                (inputs_u_w, inputs_u_s), _, _ = next(unlabeled_iter)
                 # error occurs ↓
                 # (inputs_u_w, inputs_u_s), _ = next(unlabeled_iter)
             except:
@@ -341,7 +340,7 @@ def train(args, labeled_trainloader, unlabeled_trainloader, test_loader,
                     unlabeled_epoch += 1
                     unlabeled_trainloader.sampler.set_epoch(unlabeled_epoch)
                 unlabeled_iter = iter(unlabeled_trainloader)
-                (inputs_u_w, inputs_u_s), _ = next(unlabeled_iter)
+                (inputs_u_w, inputs_u_s), _, _ = next(unlabeled_iter)
 
             data_time.update(time.time() - end)
             batch_size = inputs_x.shape[0]
