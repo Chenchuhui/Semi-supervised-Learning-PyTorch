@@ -7,8 +7,6 @@ import shutil
 import time
 from collections import OrderedDict
 
-import dataset.cifar as dataset
-
 import numpy as np
 import torch
 import torch.nn.functional as F
@@ -19,7 +17,8 @@ from torch.utils.data.distributed import DistributedSampler
 from tensorboardX import SummaryWriter
 from tqdm import tqdm
 
-from dataset.cifar import DATASET_GETTERS
+from dataset.cv_dataset import DATASET_GETTERS
+from dataset.utils import CBSBatchSampler
 from utils import Bar, Logger, AverageMeter, accuracy, mkdir_p, savefig
 
 logger = logging.getLogger(__name__)
@@ -66,7 +65,6 @@ def de_interleave(x, size):
     s = list(x.shape)
     return x.reshape([size, -1] + s[1:]).transpose(0, 1).reshape([-1] + s[1:])
 
-
 def main():
     parser = argparse.ArgumentParser(description='PyTorch FixMatch Training')
     parser.add_argument('--gpu-id', default='0', type=int,
@@ -74,7 +72,7 @@ def main():
     parser.add_argument('--num-workers', type=int, default=4,
                         help='number of workers')
     parser.add_argument('--dataset', default='cifar10', type=str,
-                        choices=['cifar10', 'cifar100'],
+                        choices=['cifar10', 'cifar100', 'svhn'],
                         help='dataset name')
     parser.add_argument('--num-labeled', type=int, default=4000,
                         help='number of labeled data')
@@ -97,6 +95,8 @@ def main():
                         help='warmup epochs (unlabeled data based)')
     parser.add_argument('--wdecay', default=5e-4, type=float,
                         help='weight decay')
+    parser.add_argument('--CBS', action='store_true', default=True,
+                        help='use Circulum Batch Size. Faster Convergence')
     parser.add_argument('--nesterov', action='store_true', default=True,
                         help='use nesterov momentum')
     parser.add_argument('--use-ema', action='store_true', default=True,
@@ -109,6 +109,8 @@ def main():
                         help='coefficient of unlabeled loss')
     parser.add_argument('--T', default=1, type=float,
                         help='pseudo label temperature')
+    parser.add_argument('--alpha', default=0.7, type=float,
+                        help='CBS index')
     parser.add_argument('--img-size', type=int, default=32,
                         help='Image Size')
     parser.add_argument('--crop-ratio', type=float, default=0.875,
@@ -184,7 +186,7 @@ def main():
         os.makedirs(args.out, exist_ok=True)
         args.writer = SummaryWriter(args.out)
 
-    if args.dataset == 'cifar10':
+    if args.dataset == 'cifar10' or 'svhn':
         args.num_classes = 10
         if args.arch == 'wideresnet':
             args.model_depth = 28
@@ -203,15 +205,21 @@ def main():
             args.model_cardinality = 8
             args.model_depth = 29
             args.model_width = 64
+    
 
     if args.local_rank not in [-1, 0]:
         torch.distributed.barrier()
 
     labeled_dataset, unlabeled_dataset, test_dataset = DATASET_GETTERS[args.dataset](
         args, './data')
-    # labeled_set, unlabeled_set, val_set, test_set = dataset.get_cifar(args, 'fixmatch', args.dataset, args.num_labeled, args.num_classes, preaug=False)    
+    unlabeled_sampler = CBSBatchSampler(unlabeled_dataset, args.batch_size*args.mu, args.alpha, args.train_iteration, args.total_steps)
     labeled_trainloader = DataLoader(labeled_dataset, batch_size=args.batch_size, shuffle=True, num_workers=args.num_workers, drop_last=True)
-    unlabeled_trainloader = DataLoader(unlabeled_dataset, batch_size=args.batch_size*args.mu, shuffle=True, num_workers=args.num_workers, drop_last=True)
+    if args.CBS:
+        unlabeled_sampler = CBSBatchSampler(unlabeled_dataset, args.batch_size*args.mu, args.alpha, args.train_iteration, args.total_steps)
+        unlabeled_trainloader = DataLoader(unlabeled_dataset, batch_sampler=unlabeled_sampler, num_workers=args.num_workers)
+    else:
+        unlabeled_trainloader = DataLoader(unlabeled_dataset, batch_size=args.batch_size*args.mu, shuffle=True, num_workers=args.num_workers, drop_last=True)
+
     test_loader = DataLoader(test_dataset, batch_size=args.batch_size, shuffle=False, num_workers=0)
 
     if args.local_rank == 0:
@@ -263,7 +271,7 @@ def main():
         log = Logger(os.path.join(args.out, 'log.txt'), resume=True)
     else:
         log = Logger(os.path.join(args.out, 'log.txt'))
-        log.set_names(['Train Loss', 'Train Loss X', 'Train Loss U', 'Test Loss', 'Test Acc.'])
+        log.set_names(['Train Loss', 'Train Loss X', 'Train Loss U', 'Test Loss', 'Test Acc.', 'Epoch Time'])
 
     if args.amp:
         from apex import amp
@@ -285,11 +293,11 @@ def main():
 
     model.zero_grad()
     train(args, labeled_trainloader, unlabeled_trainloader, test_loader,
-          model, optimizer, ema_model, scheduler, log)
+          model, optimizer, ema_model, scheduler, log, unlabeled_sampler)
 
 
 def train(args, labeled_trainloader, unlabeled_trainloader, test_loader,
-          model, optimizer, ema_model, scheduler, log):
+          model, optimizer, ema_model, scheduler, log, ulb_sampler:CBSBatchSampler=None):
     if args.amp:
         from apex import amp
     global best_acc
@@ -305,14 +313,20 @@ def train(args, labeled_trainloader, unlabeled_trainloader, test_loader,
     labeled_iter = iter(labeled_trainloader)
     unlabeled_iter = iter(unlabeled_trainloader)
 
+    epoch_time = AverageMeter()
     model.train()
+    if ulb_sampler is not None:
+        ulb_sampler.reset_epoch(args.start_epoch)
     for epoch in range(args.start_epoch, args.epochs):
+        epoch_start = time.time()
         batch_time = AverageMeter()
         data_time = AverageMeter()
         losses = AverageMeter()
         losses_x = AverageMeter()
         losses_u = AverageMeter()
         mask_probs = AverageMeter()
+        if ulb_sampler is not None:
+            ulb_sampler.reset_epoch(epoch)
         if not args.no_progress:
             p_bar = tqdm(range(args.train_iteration),
                          disable=args.local_rank not in [-1, 0])
@@ -344,11 +358,12 @@ def train(args, labeled_trainloader, unlabeled_trainloader, test_loader,
 
             data_time.update(time.time() - end)
             batch_size = inputs_x.shape[0]
+            ulb_batch_size = inputs_u_w.shape[0]
             inputs = interleave(
-                torch.cat((inputs_x, inputs_u_w, inputs_u_s)), 2*args.mu+1).to(args.device)
+                torch.cat((inputs_x, inputs_u_w, inputs_u_s)), 2).to(args.device)
             targets_x = targets_x.to(args.device)
             logits = model(inputs)
-            logits = de_interleave(logits, 2*args.mu+1)
+            logits = de_interleave(logits, 2)
             logits_x = logits[:batch_size]
             logits_u_w, logits_u_s = logits[batch_size:].chunk(2)
             del logits
@@ -362,7 +377,7 @@ def train(args, labeled_trainloader, unlabeled_trainloader, test_loader,
             Lu = (F.cross_entropy(logits_u_s, targets_u,
                                   reduction='none') * mask).mean()
 
-            loss = Lx + args.lambda_u * Lu
+            loss = Lx + args.lambda_u * (ulb_batch_size / batch_size) * Lu
 
             if args.amp:
                 with amp.scale_loss(loss, optimizer) as scaled_loss:
@@ -397,6 +412,7 @@ def train(args, labeled_trainloader, unlabeled_trainloader, test_loader,
                     mask=mask_probs.avg))
                 p_bar.update()
 
+        epoch_time.update(time.time()-epoch_start)
         if not args.no_progress:
             p_bar.close()
 
@@ -415,7 +431,7 @@ def train(args, labeled_trainloader, unlabeled_trainloader, test_loader,
             args.writer.add_scalar('test/1.test_acc', test_acc, epoch)
             args.writer.add_scalar('test/2.test_loss', test_loss, epoch)
 
-            log.append([losses.avg, losses_x.avg, losses_u.avg, test_loss, test_acc])
+            log.append([losses.avg, losses_x.avg, losses_u.avg, test_loss, test_acc, epoch_time.avg])
 
             is_best = test_acc > best_acc
             best_acc = max(test_acc, best_acc)

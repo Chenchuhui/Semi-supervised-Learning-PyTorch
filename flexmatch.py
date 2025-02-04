@@ -7,19 +7,18 @@ import shutil
 import time
 from collections import OrderedDict, Counter
 
-import dataset.cifar as dataset
-
 import numpy as np
 import torch
 import torch.nn.functional as F
 import torch.optim as optim
 from torch.optim.lr_scheduler import LambdaLR
-from torch.utils.data import DataLoader, RandomSampler, SequentialSampler
+from torch.utils.data import DataLoader
 from torch.utils.data.distributed import DistributedSampler
 from tensorboardX import SummaryWriter
 from tqdm import tqdm
 
-from dataset.cifar import DATASET_GETTERS
+from dataset.cv_dataset import DATASET_GETTERS
+from dataset.utils import CBSBatchSampler
 from utils import Bar, Logger, AverageMeter, accuracy, mkdir_p, savefig
 
 logger = logging.getLogger(__name__)
@@ -109,6 +108,8 @@ def main():
                         help='EMA decay rate')
     parser.add_argument('--mu', default=7, type=int,
                         help='coefficient of unlabeled batch size')
+    parser.add_argument('--alpha', default=0.7, type=float,
+                        help='CBS index')
     parser.add_argument('--lambda-u', default=1, type=float,
                         help='coefficient of unlabeled loss')
     parser.add_argument('--T', default=1, type=float,
@@ -213,9 +214,10 @@ def main():
 
     labeled_dataset, unlabeled_dataset, test_dataset = DATASET_GETTERS[args.dataset](
         args, './data')
-    # labeled_set, unlabeled_set, val_set, test_set = dataset.get_cifar(args, 'fixmatch', args.dataset, args.num_labeled, args.num_classes, preaug=False)    
+    # labeled_set, unlabeled_set, val_set, test_set = dataset.get_cifar(args, 'fixmatch', args.dataset, args.num_labeled, args.num_classes, preaug=False)
+    unlabeled_sampler = CBSBatchSampler(unlabeled_dataset, args.batch_size*args.mu, args.alpha, args.train_iteration, args.total_steps)
     labeled_trainloader = DataLoader(labeled_dataset, batch_size=args.batch_size, shuffle=True, num_workers=args.num_workers, drop_last=True)
-    unlabeled_trainloader = DataLoader(unlabeled_dataset, batch_size=args.batch_size*args.mu, shuffle=True, num_workers=args.num_workers, drop_last=True)
+    unlabeled_trainloader = DataLoader(unlabeled_dataset, batch_sampler=unlabeled_sampler, num_workers=args.num_workers)
     test_loader = DataLoader(test_dataset, batch_size=args.batch_size, shuffle=False, num_workers=0)
 
     if args.local_rank == 0:
@@ -267,7 +269,7 @@ def main():
         log = Logger(os.path.join(args.out, 'log.txt'), resume=True)
     else:
         log = Logger(os.path.join(args.out, 'log.txt'))
-        log.set_names(['Train Loss', 'Train Loss X', 'Train Loss U', 'Test Loss', 'Test Acc.'])
+        log.set_names(['Train Loss', 'Train Loss X', 'Train Loss U', 'Test Loss', 'Test Acc.', 'Epoch Time'])
 
     if args.amp:
         from apex import amp
@@ -292,11 +294,11 @@ def main():
     
     model.zero_grad()
     train(args, labeled_trainloader, unlabeled_trainloader, test_loader,
-          model, optimizer, ema_model, scheduler, log, learning_status, mapping)
+          model, optimizer, ema_model, scheduler, log, learning_status, mapping, unlabeled_sampler)
 
 
 def train(args, labeled_trainloader, unlabeled_trainloader, test_loader,
-          model, optimizer, ema_model, scheduler, log, learning_status, mapping):
+          model, optimizer, ema_model, scheduler, log, learning_status, mapping, ulb_sampler:CBSBatchSampler):
     if args.amp:
         from apex import amp
     global best_acc
@@ -314,13 +316,16 @@ def train(args, labeled_trainloader, unlabeled_trainloader, test_loader,
     N = len(learning_status) # Number of unlabeled data
 
     model.train()
+    ulb_sampler.reset_epoch(args.start_epoch)
     for epoch in range(args.start_epoch, args.epochs):
+        epoch_start = time.time()
         batch_time = AverageMeter()
         data_time = AverageMeter()
         losses = AverageMeter()
         losses_x = AverageMeter()
         losses_u = AverageMeter()
         mask_probs = AverageMeter()
+        ulb_sampler.reset_epoch(epoch)
         if not args.no_progress:
             p_bar = tqdm(range(args.train_iteration),
                          disable=args.local_rank not in [-1, 0])
@@ -353,11 +358,12 @@ def train(args, labeled_trainloader, unlabeled_trainloader, test_loader,
             data_time.update(time.time() - end)
             cls_thresholds = torch.zeros(args.num_classes, device=args.device)
             batch_size = inputs_x.shape[0]
+            ulb_batch_size = inputs_u_w.shape[0]
             inputs = interleave(
-                torch.cat((inputs_x, inputs_u_w, inputs_u_s)), 2*args.mu+1).to(args.device)
+                torch.cat((inputs_x, inputs_u_w, inputs_u_s)), 2).to(args.device)
             targets_x = targets_x.to(args.device)
             logits = model(inputs)
-            logits = de_interleave(logits, 2*args.mu+1)
+            logits = de_interleave(logits, 2)
             logits_x = logits[:batch_size]
             logits_u_w, logits_u_s = logits[batch_size:].chunk(2)
             del logits
@@ -397,7 +403,7 @@ def train(args, labeled_trainloader, unlabeled_trainloader, test_loader,
             Lu = (F.cross_entropy(logits_u_s, targets_u,
                                   reduction='none') * mask).mean()
 
-            loss = Lx + args.lambda_u * Lu
+            loss = Lx + args.lambda_u * (ulb_batch_size / batch_size) * Lu
 
             if args.amp:
                 with amp.scale_loss(loss, optimizer) as scaled_loss:
@@ -431,7 +437,8 @@ def train(args, labeled_trainloader, unlabeled_trainloader, test_loader,
                     loss_u=losses_u.avg,
                     mask=mask_probs.avg))
                 p_bar.update()
-
+        
+        epoch_time = time.time() - epoch_start
         if not args.no_progress:
             p_bar.close()
 
@@ -450,7 +457,7 @@ def train(args, labeled_trainloader, unlabeled_trainloader, test_loader,
             args.writer.add_scalar('test/1.test_acc', test_acc, epoch)
             args.writer.add_scalar('test/2.test_loss', test_loss, epoch)
 
-            log.append([losses.avg, losses_x.avg, losses_u.avg, test_loss, test_acc])
+            log.append([losses.avg, losses_x.avg, losses_u.avg, test_loss, test_acc, epoch_time])
 
             is_best = test_acc > best_acc
             best_acc = max(test_acc, best_acc)

@@ -271,5 +271,3 @@ class CIFAR100SSLPreaug(datasets.CIFAR100):
 
         return img, target
     
-DATASET_GETTERS = {'cifar10': get_cifar10,
-                   'cifar100': get_cifar100}
