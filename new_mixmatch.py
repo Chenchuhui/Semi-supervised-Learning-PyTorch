@@ -56,14 +56,40 @@ def get_cosine_schedule_with_warmup(optimizer,
     return LambdaLR(optimizer, _lr_lambda, last_epoch)
 
 
-def interleave(x, size):
-    s = list(x.shape)
-    return x.reshape([-1, size] + s[1:]).transpose(0, 1).reshape([-1] + s[1:])
+def interleave_offsets(batch, nu):
+    groups = [batch // (nu + 1)] * (nu + 1)
+    for x in range(batch - sum(groups)):
+        groups[-x - 1] += 1
+    offsets = [0]
+    for g in groups:
+        offsets.append(offsets[-1] + g)
+    assert offsets[-1] == batch
+    return offsets
 
 
-def de_interleave(x, size):
-    s = list(x.shape)
-    return x.reshape([size, -1] + s[1:]).transpose(0, 1).reshape([-1] + s[1:])
+def interleave(xy, batch):
+    nu = len(xy) - 1
+    offsets = interleave_offsets(batch, nu)
+    xy = [[v[offsets[p]:offsets[p + 1]] for p in range(nu + 1)] for v in xy]
+    for i in range(1, nu + 1):
+        xy[0][i], xy[i][i] = xy[i][i], xy[0][i]
+    return [torch.cat(v, dim=0) for v in xy]
+
+def linear_rampup(current, rampup_length):
+            if rampup_length == 0:
+                return 1.0
+            else:
+                current = np.clip(current / rampup_length, 0.0, 1.0)
+                return float(current)
+            
+class SemiLoss(object):   
+    def __call__(self, outputs_x, targets_x, outputs_u, targets_u, epoch, args):
+        probs_u = torch.softmax(outputs_u, dim=1)
+
+        Lx = -torch.mean(torch.sum(F.log_softmax(outputs_x, dim=1) * targets_x, dim=1))
+        Lu = torch.mean((probs_u - targets_u)**2)
+
+        return Lx, Lu, args.lambda_u * linear_rampup(epoch, args.epochs)
 
 def main():
     parser = argparse.ArgumentParser(description='PyTorch FixMatch Training')
@@ -74,7 +100,7 @@ def main():
     parser.add_argument('--dataset', default='cifar10', type=str,
                         choices=['cifar10', 'cifar100', 'svhn'],
                         help='dataset name')
-    parser.add_argument('--num-labeled', type=int, default=4000,
+    parser.add_argument('--num-labeled', type=int, default=250,
                         help='number of labeled data')
     parser.add_argument("--expand-labels", action="store_true",
                         help="expand labels to fit eval steps")
@@ -89,11 +115,11 @@ def main():
                         help='manual epoch number (useful on restarts)')
     parser.add_argument('--batch-size', default=64, type=int,
                         help='train batchsize')
-    parser.add_argument('--lr', '--learning-rate', default=0.002, type=float,
+    parser.add_argument('--lr', '--learning-rate', default=0.03, type=float,
                         help='initial learning rate')
     parser.add_argument('--warmup', default=0, type=float,
                         help='warmup epochs (unlabeled data based)')
-    parser.add_argument('--CBS', action='store_true', default=True,
+    parser.add_argument('--CBS', action='store_true', default=False,
                         help='use Circulum Batch Size. Faster Convergence')
     parser.add_argument('--nesterov', action='store_true', default=True,
                         help='use nesterov momentum')
@@ -101,11 +127,13 @@ def main():
                         help='use EMA model')
     parser.add_argument('--ema-decay', default=0.999, type=float,
                         help='EMA decay rate')
-    parser.add_argument('--lambda-u', default=1, type=float,
+    parser.add_argument('--lambda-u', default=75, type=float,
                         help='coefficient of unlabeled loss')
-    parser.add_argument('--T', default=1, type=float,
+    parser.add_argument('--T', default=0.5, type=float,
                         help='pseudo label temperature')
-    parser.add_argument('--alpha', default=0.7, type=float,
+    parser.add_argument('--alpha', default=0.75, type=float,
+                        help='Beta distribution parameter')
+    parser.add_argument('--CBS-alpha', default=0.7, type=float,
                         help='CBS index')
     parser.add_argument('--img-size', type=int, default=32,
                         help='Image Size')
@@ -130,7 +158,9 @@ def main():
                     help='If set, use preprocessed augmented data to speed up training and better utilize GPU resources.')
     parser.add_argument('--rep', type=int, default=1, 
                     help='Repetition Index. Number of repetitive augmentations of the same image (optional, valid only in preaug mode).')
-
+    parser.add_argument('--wdecay', default=4e-4, type=float,
+                        help='weight decay')
+    
     args = parser.parse_args()
     global best_acc
 
@@ -206,9 +236,10 @@ def main():
 
     labeled_dataset, unlabeled_dataset, test_dataset = DATASET_GETTERS[args.dataset](
         args, './data')
+    unlabeled_sampler = None
     labeled_trainloader = DataLoader(labeled_dataset, batch_size=args.batch_size, shuffle=True, num_workers=args.num_workers, drop_last=True)
     if args.CBS:
-        unlabeled_sampler = CBSBatchSampler(unlabeled_dataset, args.batch_size, args.alpha, args.train_iteration, args.total_steps)
+        unlabeled_sampler = CBSBatchSampler(unlabeled_dataset, args.batch_size, args.CBS_alpha, args.train_iteration, args.total_steps)
         unlabeled_trainloader = DataLoader(unlabeled_dataset, batch_sampler=unlabeled_sampler, num_workers=args.num_workers)
     else:
         unlabeled_trainloader = DataLoader(unlabeled_dataset, batch_size=args.batch_size, shuffle=True, num_workers=args.num_workers, drop_last=True)
@@ -228,7 +259,16 @@ def main():
 
     model.to(args.device)
 
-    optimizer = optim.Adam(model.parameters(), lr=args.lr)
+    no_decay = ['bias', 'bn']
+    grouped_parameters = [
+        {'params': [p for n, p in model.named_parameters() if not any(
+            nd in n for nd in no_decay)], 'weight_decay': args.wdecay},
+        {'params': [p for n, p in model.named_parameters() if any(
+            nd in n for nd in no_decay)], 'weight_decay': 0.0}
+    ]
+    train_criterion = SemiLoss()
+    optimizer = optim.SGD(grouped_parameters, lr=args.lr,
+                          momentum=0.9, nesterov=args.nesterov)
 
     args.epochs = math.ceil(args.total_steps / args.train_iteration)
     scheduler = get_cosine_schedule_with_warmup(
@@ -278,11 +318,11 @@ def main():
 
     model.zero_grad()
     train(args, labeled_trainloader, unlabeled_trainloader, test_loader,
-          model, optimizer, ema_model, scheduler, log, unlabeled_sampler)
+          model, optimizer, ema_model, scheduler, log, train_criterion, unlabeled_sampler)
 
 
 def train(args, labeled_trainloader, unlabeled_trainloader, test_loader,
-          model, optimizer, ema_model, scheduler, log, ulb_sampler:CBSBatchSampler=None):
+          model, optimizer, ema_model, scheduler, log, criterion, ulb_sampler:CBSBatchSampler=None):
     if args.amp:
         from apex import amp
     global best_acc
@@ -341,13 +381,15 @@ def train(args, labeled_trainloader, unlabeled_trainloader, test_loader,
                 (inputs_u_w, inputs_u_s), _, _ = next(unlabeled_iter)
 
             data_time.update(time.time() - end)
-            batch_size = inputs_x.shape[0]
-            targets_x = torch.zeros(batch_size, args.num_classes).scatter_(1, targets_x.view(-1,1).long(), 1)
+            batch_size = inputs_x.size(0)
             ulb_batch_size = inputs_u_w.shape[0]
+
+            targets_x = torch.zeros(batch_size, args.num_classes).scatter_(1, targets_x.view(-1,1).long(), 1)
             
             inputs_x, targets_x = inputs_x.to(args.device), targets_x.to(args.device)
             inputs_u_w = inputs_u_w.to(args.device)
             inputs_u_s = inputs_u_s.to(args.device)
+
             with torch.no_grad():
                 # compute guessed labels of unlabel samples
                 outputs_u1 = model(inputs_u_w)
@@ -373,23 +415,29 @@ def train(args, labeled_trainloader, unlabeled_trainloader, test_loader,
             # Mixup
             mixed_input = l * input_a + (1 - l) * input_b
             mixed_target = l * target_a + (1 - l) * target_b
-
-            mixed_input = torch.split(mixed_input, [batch_size, ulb_batch_size, ulb_batch_size])
-            inputs = interleave(torch.cat((mixed_input[0], mixed_input[1], mixed_input[2])), 2).to(args.device)
-
-            mixed_target = mixed_target.to(args.device)
-            logits = model(inputs)
-            logits = de_interleave(logits, 2)
-            logits_x = logits[:batch_size]
-            logits_u = logits[batch_size:]
-            del logits
             
-            probs_u = torch.softmax(logits_u, dim=1)
+            # mixed_input = interleave(mixed_input, 3).to(args.device)
+            # mixed_target = mixed_target.to(args.device)
 
-            Lx = -torch.mean(torch.sum(F.log_softmax(logits_x, dim=1) * mixed_target[:batch_size], dim=1))
-            Lu = torch.mean((probs_u - mixed_target[batch_size:])**2)
+            # logits = model(mixed_input)
+            # logits = de_interleave(logits, 3)
 
-            loss = Lx + args.lambda_u * (ulb_batch_size / batch_size) * Lu
+            # logits_x = logits[:batch_size]
+            # logits_u = logits[batch_size:]
+
+            mixed_input = list(torch.split(mixed_input, batch_size))
+            mixed_input = interleave(mixed_input, batch_size)
+
+            logits = [model(mixed_input[0])]
+            for input in mixed_input[1:]:
+                logits.append(model(input))
+            logits = interleave(logits, batch_size)
+            logits_x = logits[0]
+            logits_u = torch.cat(logits[1:], dim=0)
+
+            Lx, Lu, w = criterion(logits_x, mixed_target[:batch_size], logits_u, mixed_target[batch_size:], epoch+batch_idx/args.train_iteration, args)
+
+            loss = Lx + w * (ulb_batch_size / batch_size) * Lu
 
             if args.amp:
                 with amp.scale_loss(loss, optimizer) as scaled_loss:
@@ -409,7 +457,7 @@ def train(args, labeled_trainloader, unlabeled_trainloader, test_loader,
             batch_time.update(time.time() - end)
             end = time.time()
             if not args.no_progress:
-                p_bar.set_description("Train Epoch: {epoch}/{epochs:4}. Iter: {batch:4}/{iter:4}. LR: {lr:.4f}. Data: {data:.3f}s. Batch: {bt:.3f}s. Loss: {loss:.4f}. Loss_x: {loss_x:.4f}. Loss_u: {loss_u:.4f}. ".format(
+                p_bar.set_description("Train Epoch: {epoch}/{epochs:4}. Iter: {batch:4}/{iter:4}. LR: {lr:.4f}. Data: {data:.3f}s. Batch: {bt:.3f}s. Loss: {loss:.4f}. Loss_x: {loss_x:.4f}. Loss_u: {loss_u:.4f}. W: {w:.4f}".format(
                     epoch=epoch + 1,
                     epochs=args.epochs,
                     batch=batch_idx + 1,
@@ -419,7 +467,8 @@ def train(args, labeled_trainloader, unlabeled_trainloader, test_loader,
                     bt=batch_time.avg,
                     loss=losses.avg,
                     loss_x=losses_x.avg,
-                    loss_u=losses_u.avg))
+                    loss_u=losses_u.avg,
+                    w=w))
                 p_bar.update()
 
         epoch_time.update(time.time()-epoch_start)

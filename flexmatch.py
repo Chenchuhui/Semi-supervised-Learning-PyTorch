@@ -56,13 +56,15 @@ def get_cosine_schedule_with_warmup(optimizer,
     return LambdaLR(optimizer, _lr_lambda, last_epoch)
 
 
-def interleave(x, size):
+def interleave(x, group=2):
     s = list(x.shape)
+    size = x.shape[0] // group
     return x.reshape([-1, size] + s[1:]).transpose(0, 1).reshape([-1] + s[1:])
 
 
-def de_interleave(x, size):
+def de_interleave(x, group=2):
     s = list(x.shape)
+    size = x.shape[0] // group
     return x.reshape([size, -1] + s[1:]).transpose(0, 1).reshape([-1] + s[1:])
 
 def mapping_func(mode='convex'):
@@ -77,7 +79,7 @@ def main():
     parser.add_argument('--num-workers', type=int, default=4,
                         help='number of workers')
     parser.add_argument('--dataset', default='cifar10', type=str,
-                        choices=['cifar10', 'cifar100'],
+                        choices=['cifar10', 'cifar100', 'svhn', 'stl10'],
                         help='dataset name')
     parser.add_argument('--num-labeled', type=int, default=4000,
                         help='number of labeled data')
@@ -106,6 +108,8 @@ def main():
                         help='use EMA model')
     parser.add_argument('--ema-decay', default=0.999, type=float,
                         help='EMA decay rate')
+    parser.add_argument('--CBS', action='store_true', default=True,
+                        help='use Circulum Batch Size. Faster Convergence')
     parser.add_argument('--mu', default=7, type=int,
                         help='coefficient of unlabeled batch size')
     parser.add_argument('--alpha', default=0.7, type=float,
@@ -189,7 +193,7 @@ def main():
         os.makedirs(args.out, exist_ok=True)
         args.writer = SummaryWriter(args.out)
 
-    if args.dataset == 'cifar10':
+    if args.dataset == 'cifar10' or 'svhn' or 'stl10':
         args.num_classes = 10
         if args.arch == 'wideresnet':
             args.model_depth = 28
@@ -214,10 +218,14 @@ def main():
 
     labeled_dataset, unlabeled_dataset, test_dataset = DATASET_GETTERS[args.dataset](
         args, './data')
-    # labeled_set, unlabeled_set, val_set, test_set = dataset.get_cifar(args, 'fixmatch', args.dataset, args.num_labeled, args.num_classes, preaug=False)
     unlabeled_sampler = CBSBatchSampler(unlabeled_dataset, args.batch_size*args.mu, args.alpha, args.train_iteration, args.total_steps)
     labeled_trainloader = DataLoader(labeled_dataset, batch_size=args.batch_size, shuffle=True, num_workers=args.num_workers, drop_last=True)
-    unlabeled_trainloader = DataLoader(unlabeled_dataset, batch_sampler=unlabeled_sampler, num_workers=args.num_workers)
+    if args.CBS:
+        unlabeled_sampler = CBSBatchSampler(unlabeled_dataset, args.batch_size*args.mu, args.alpha, args.train_iteration, args.total_steps)
+        unlabeled_trainloader = DataLoader(unlabeled_dataset, batch_sampler=unlabeled_sampler, num_workers=args.num_workers)
+    else:
+        unlabeled_trainloader = DataLoader(unlabeled_dataset, batch_size=args.batch_size*args.mu, shuffle=True, num_workers=args.num_workers, drop_last=True)
+    
     test_loader = DataLoader(test_dataset, batch_size=args.batch_size, shuffle=False, num_workers=0)
 
     if args.local_rank == 0:

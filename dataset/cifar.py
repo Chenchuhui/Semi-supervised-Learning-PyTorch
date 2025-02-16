@@ -79,7 +79,7 @@ def get_cifar100(args, root):
     base_dataset = datasets.CIFAR100(
         root, train=True, download=True)
 
-    train_labeled_idxs, train_unlabeled_idxs, val_idxs = x_u_split(
+    train_labeled_idxs, train_unlabeled_idxs = x_u_split(
         args, base_dataset.targets)
 
     train_labeled_dataset = CIFAR100SSL(
@@ -88,16 +88,12 @@ def get_cifar100(args, root):
 
     train_unlabeled_dataset = CIFAR100SSL(
         root, train_unlabeled_idxs, train=True,
-        transform=UnlabeledTransform(mean=cifar100_mean, std=cifar100_std))
-
-    val_dataset = CIFAR100SSL(
-        root, val_idxs, train=True,
-        transform=transform_val)
+        transform=UnlabeledTransform(mean=cifar100_mean, std=cifar100_std, crop_size=args.img_size, crop_ratio=args.crop_ratio))
     
     test_dataset = datasets.CIFAR100(
         root, train=False, transform=transform_val, download=False)
 
-    return train_labeled_dataset, train_unlabeled_dataset, val_dataset, test_dataset
+    return train_labeled_dataset, train_unlabeled_dataset, test_dataset
 
 def x_u_split(args, labels):
     label_per_class = args.num_labeled // args.num_classes
@@ -245,7 +241,7 @@ class CIFAR100SSL(datasets.CIFAR100):
         if self.target_transform is not None:
             target = self.target_transform(target)
 
-        return img, target
+        return img, target, index
 
 class CIFAR100SSLPreaug(datasets.CIFAR100):
     def __init__(self, root, indexs, train=True,

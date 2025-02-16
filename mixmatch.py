@@ -18,7 +18,7 @@ import torchvision.transforms as transforms
 import torch.nn.functional as F
 
 import models.wideresnet as models
-from dataset.svhn import DATASET_GETTERS
+from dataset.cv_dataset import DATASET_GETTERS
 from utils import Bar, Logger, AverageMeter, accuracy, mkdir_p, savefig
 from tensorboardX import SummaryWriter
 
@@ -115,9 +115,9 @@ def main():
 
     labeled_set, unlabeled_set, test_set = DATASET_GETTERS[args.dataset](
         args, './data') 
-    labeled_subset = data.Subset(labeled_set, range(args.num_labeled))
+    # labeled_subset = data.Subset(labeled_set, range(args.num_labeled))
     labeled_trainloader = data.DataLoader(labeled_set, batch_size=args.batch_size, shuffle=True, num_workers=args.num_workers, drop_last=True)
-    train_eval_loader = data.DataLoader(labeled_subset, batch_size=args.num_labeled, shuffle=False, num_workers=args.num_workers)
+    # train_eval_loader = data.DataLoader(labeled_subset, batch_size=args.num_labeled, shuffle=False, num_workers=args.num_workers)
     unlabeled_trainloader = data.DataLoader(unlabeled_set, batch_size=args.batch_size, shuffle=True, num_workers=args.num_workers, drop_last=True)
     test_loader = data.DataLoader(test_set, batch_size=args.batch_size, shuffle=False, num_workers=args.num_workers)
 
@@ -174,7 +174,7 @@ def main():
         print('\nEpoch: [%d | %d] LR: %f' % (epoch + 1, args.epochs, state['lr']))
 
         train_loss, train_loss_x, train_loss_u = train(labeled_trainloader, unlabeled_trainloader, model, optimizer, ema_optimizer, train_criterion, epoch, use_cuda)
-        _, train_acc = validate(train_eval_loader, ema_model, criterion, epoch, use_cuda, mode='Train Stats')
+        # _, train_acc = validate(train_eval_loader, ema_model, criterion, epoch, use_cuda, mode='Train Stats')
         test_loss, test_acc = validate(test_loader, ema_model, criterion, epoch, use_cuda, mode='Test Stats ')
 
         step = args.train_iteration * (epoch + 1)
@@ -182,7 +182,7 @@ def main():
         writer.add_scalar('losses/train_loss', train_loss, step)
         writer.add_scalar('losses/test_loss', test_loss, step)
 
-        writer.add_scalar('accuracy/train_acc', train_acc, step)
+        # writer.add_scalar('accuracy/train_acc', train_acc, step)
         writer.add_scalar('accuracy/test_acc', test_acc, step)
 
         # append logger file
@@ -227,16 +227,16 @@ def train(labeled_trainloader, unlabeled_trainloader, model, optimizer, ema_opti
     model.train()
     for batch_idx in range(args.train_iteration):
         try:
-            inputs_x, targets_x = next(labeled_train_iter)
+            inputs_x, targets_x, _ = next(labeled_train_iter)
         except:
             print("labeled data exhausted")
             labeled_train_iter = iter(labeled_trainloader)
-            inputs_x, targets_x = next(labeled_train_iter)
+            inputs_x, targets_x, _ = next(labeled_train_iter)
         try:
-            (inputs_u, inputs_u2), _ = next(unlabeled_train_iter)
+            (inputs_u, inputs_u2), _, _ = next(unlabeled_train_iter)
         except:
             unlabeled_train_iter = iter(unlabeled_trainloader)
-            (inputs_u, inputs_u2), _ = next(unlabeled_train_iter)
+            (inputs_u, inputs_u2), _, _ = next(unlabeled_train_iter)
 
         # measure data loading time
         data_time.update(time.time() - end)

@@ -1,2 +1,0 @@
-Train Loss	Train Loss X	Train Loss U	Test Loss	Test Acc.	Epoch Time	
-0.948027	0.947792	0.030122	3.475124	10.390000	21.295418	

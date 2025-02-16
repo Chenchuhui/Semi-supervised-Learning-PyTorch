@@ -56,13 +56,15 @@ def get_cosine_schedule_with_warmup(optimizer,
     return LambdaLR(optimizer, _lr_lambda, last_epoch)
 
 
-def interleave(x, size):
+def interleave(x, group=2):
     s = list(x.shape)
+    size = x.shape[0] // group
     return x.reshape([-1, size] + s[1:]).transpose(0, 1).reshape([-1] + s[1:])
 
 
-def de_interleave(x, size):
+def de_interleave(x, group=2):
     s = list(x.shape)
+    size = x.shape[0] // group
     return x.reshape([size, -1] + s[1:]).transpose(0, 1).reshape([-1] + s[1:])
 
 def main():
@@ -72,7 +74,7 @@ def main():
     parser.add_argument('--num-workers', type=int, default=4,
                         help='number of workers')
     parser.add_argument('--dataset', default='cifar10', type=str,
-                        choices=['cifar10', 'cifar100', 'svhn'],
+                        choices=['cifar10', 'cifar100', 'svhn', 'stl10'],
                         help='dataset name')
     parser.add_argument('--num-labeled', type=int, default=4000,
                         help='number of labeled data')
@@ -186,7 +188,7 @@ def main():
         os.makedirs(args.out, exist_ok=True)
         args.writer = SummaryWriter(args.out)
 
-    if args.dataset == 'cifar10' or 'svhn':
+    if args.dataset == 'cifar10' or 'svhn' or 'stl10':
         args.num_classes = 10
         if args.arch == 'wideresnet':
             args.model_depth = 28
