@@ -145,6 +145,7 @@ def main():
     def create_model(args):
         if args.arch == 'wideresnet':
             import models.wideresnet as models
+            print(args.num_classes)
             model = models.WideResNet(depth=args.model_depth,
                                             widen_factor=args.model_width,
                                             dropRate=0,
@@ -188,7 +189,7 @@ def main():
         os.makedirs(args.out, exist_ok=True)
         args.writer = SummaryWriter(args.out)
 
-    if args.dataset == 'cifar10' or 'svhn' or 'stl10':
+    if args.dataset in ['cifar10', 'svhn', 'stl10']:
         args.num_classes = 10
         if args.arch == 'wideresnet':
             args.model_depth = 28

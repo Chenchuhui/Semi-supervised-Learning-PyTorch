@@ -41,19 +41,19 @@ def set_seed(args):
         torch.cuda.manual_seed_all(args.seed)
 
 
-def get_cosine_schedule_with_warmup(optimizer,
-                                    num_warmup_steps,
-                                    num_training_steps,
-                                    num_cycles=7./16.,
-                                    last_epoch=-1):
-    def _lr_lambda(current_step):
-        if current_step < num_warmup_steps:
-            return float(current_step) / float(max(1, num_warmup_steps))
-        no_progress = float(current_step - num_warmup_steps) / \
-            float(max(1, num_training_steps - num_warmup_steps))
-        return max(0., math.cos(math.pi * num_cycles * no_progress))
+# def get_cosine_schedule_with_warmup(optimizer,
+#                                     num_warmup_steps,
+#                                     num_training_steps,
+#                                     num_cycles=7./16.,
+#                                     last_epoch=-1):
+#     def _lr_lambda(current_step):
+#         if current_step < num_warmup_steps:
+#             return float(current_step) / float(max(1, num_warmup_steps))
+#         no_progress = float(current_step - num_warmup_steps) / \
+#             float(max(1, num_training_steps - num_warmup_steps))
+#         return max(0., math.cos(math.pi * num_cycles * no_progress))
 
-    return LambdaLR(optimizer, _lr_lambda, last_epoch)
+#     return LambdaLR(optimizer, _lr_lambda, last_epoch)
 
 
 def interleave_offsets(batch, nu):
@@ -75,6 +75,17 @@ def interleave(xy, batch):
         xy[0][i], xy[i][i] = xy[i][i], xy[0][i]
     return [torch.cat(v, dim=0) for v in xy]
 
+# def interleave(x, group=2):
+#     s = list(x.shape)
+#     size = x.shape[0] // group
+#     return x.reshape([-1, size] + s[1:]).transpose(0, 1).reshape([-1] + s[1:])
+
+
+# def de_interleave(x, group=2):
+#     s = list(x.shape)
+#     size = x.shape[0] // group
+#     return x.reshape([size, -1] + s[1:]).transpose(0, 1).reshape([-1] + s[1:])
+
 def linear_rampup(current, rampup_length):
             if rampup_length == 0:
                 return 1.0
@@ -92,7 +103,7 @@ class SemiLoss(object):
         return Lx, Lu, args.lambda_u * linear_rampup(epoch, args.epochs)
 
 def main():
-    parser = argparse.ArgumentParser(description='PyTorch FixMatch Training')
+    parser = argparse.ArgumentParser(description='PyTorch MixMatch Training')
     parser.add_argument('--gpu-id', default='0', type=int,
                         help='id(s) for CUDA_VISIBLE_DEVICES')
     parser.add_argument('--num-workers', type=int, default=4,
@@ -115,7 +126,7 @@ def main():
                         help='manual epoch number (useful on restarts)')
     parser.add_argument('--batch-size', default=64, type=int,
                         help='train batchsize')
-    parser.add_argument('--lr', '--learning-rate', default=0.03, type=float,
+    parser.add_argument('--lr', '--learning-rate', default=0.002, type=float,
                         help='initial learning rate')
     parser.add_argument('--warmup', default=0, type=float,
                         help='warmup epochs (unlabeled data based)')
@@ -133,7 +144,7 @@ def main():
                         help='pseudo label temperature')
     parser.add_argument('--alpha', default=0.75, type=float,
                         help='Beta distribution parameter')
-    parser.add_argument('--CBS-alpha', default=0.7, type=float,
+    parser.add_argument('--CBS-alpha', default=0.3, type=float,
                         help='CBS index')
     parser.add_argument('--img-size', type=int, default=32,
                         help='Image Size')
@@ -244,7 +255,7 @@ def main():
     else:
         unlabeled_trainloader = DataLoader(unlabeled_dataset, batch_size=args.batch_size, shuffle=True, num_workers=args.num_workers, drop_last=True)
 
-    test_loader = DataLoader(test_dataset, batch_size=args.batch_size, shuffle=False, num_workers=0)
+    test_loader = DataLoader(test_dataset, batch_size=args.batch_size, shuffle=False, num_workers=args.num_workers)
 
     if args.local_rank == 0:
         torch.distributed.barrier()
@@ -259,20 +270,17 @@ def main():
 
     model.to(args.device)
 
-    no_decay = ['bias', 'bn']
-    grouped_parameters = [
-        {'params': [p for n, p in model.named_parameters() if not any(
-            nd in n for nd in no_decay)], 'weight_decay': args.wdecay},
-        {'params': [p for n, p in model.named_parameters() if any(
-            nd in n for nd in no_decay)], 'weight_decay': 0.0}
-    ]
+    # no_decay = ['bias', 'bn']
+    # grouped_parameters = [
+    #     {'params': [p for n, p in model.named_parameters() if not any(
+    #         nd in n for nd in no_decay)], 'weight_decay': args.wdecay},
+    #     {'params': [p for n, p in model.named_parameters() if any(
+    #         nd in n for nd in no_decay)], 'weight_decay': 0.0}
+    # ]
     train_criterion = SemiLoss()
-    optimizer = optim.SGD(grouped_parameters, lr=args.lr,
-                          momentum=0.9, nesterov=args.nesterov)
+    optimizer = optim.Adam(model.parameters(), lr=args.lr)
 
     args.epochs = math.ceil(args.total_steps / args.train_iteration)
-    scheduler = get_cosine_schedule_with_warmup(
-        optimizer, args.warmup, args.total_steps)
 
     if args.use_ema:
         from models.ema import ModelEMA
@@ -292,7 +300,6 @@ def main():
         if args.use_ema:
             ema_model.ema.load_state_dict(checkpoint['ema_state_dict'])
         optimizer.load_state_dict(checkpoint['optimizer'])
-        scheduler.load_state_dict(checkpoint['scheduler'])
         log = Logger(os.path.join(args.out, 'log.txt'), resume=True)
     else:
         log = Logger(os.path.join(args.out, 'log.txt'))
@@ -318,11 +325,11 @@ def main():
 
     model.zero_grad()
     train(args, labeled_trainloader, unlabeled_trainloader, test_loader,
-          model, optimizer, ema_model, scheduler, log, train_criterion, unlabeled_sampler)
+          model, optimizer, ema_model, log, train_criterion, unlabeled_sampler)
 
 
 def train(args, labeled_trainloader, unlabeled_trainloader, test_loader,
-          model, optimizer, ema_model, scheduler, log, criterion, ulb_sampler:CBSBatchSampler=None):
+          model, optimizer, ema_model, log, criterion, ulb_sampler:CBSBatchSampler=None):
     if args.amp:
         from apex import amp
     global best_acc
@@ -335,11 +342,9 @@ def train(args, labeled_trainloader, unlabeled_trainloader, test_loader,
         labeled_trainloader.sampler.set_epoch(labeled_epoch)
         unlabeled_trainloader.sampler.set_epoch(unlabeled_epoch)
 
-    labeled_iter = iter(labeled_trainloader)
-    unlabeled_iter = iter(unlabeled_trainloader)
 
     epoch_time = AverageMeter()
-    model.train()
+    
     if ulb_sampler is not None:
         ulb_sampler.reset_epoch(args.start_epoch)
     for epoch in range(args.start_epoch, args.epochs):
@@ -349,11 +354,17 @@ def train(args, labeled_trainloader, unlabeled_trainloader, test_loader,
         losses = AverageMeter()
         losses_x = AverageMeter()
         losses_u = AverageMeter()
+        ws = AverageMeter()
         if ulb_sampler is not None:
             ulb_sampler.reset_epoch(epoch)
         if not args.no_progress:
             p_bar = tqdm(range(args.train_iteration),
                          disable=args.local_rank not in [-1, 0])
+        
+        labeled_iter = iter(labeled_trainloader)
+        unlabeled_iter = iter(unlabeled_trainloader)
+
+        model.train()
         for batch_idx in range(args.train_iteration):
             try:
                 inputs_x, targets_x, _ = next(labeled_iter)
@@ -382,7 +393,7 @@ def train(args, labeled_trainloader, unlabeled_trainloader, test_loader,
 
             data_time.update(time.time() - end)
             batch_size = inputs_x.size(0)
-            ulb_batch_size = inputs_u_w.shape[0]
+            ulb_batch_size = inputs_u_w.size(0)
 
             targets_x = torch.zeros(batch_size, args.num_classes).scatter_(1, targets_x.view(-1,1).long(), 1)
             
@@ -416,11 +427,11 @@ def train(args, labeled_trainloader, unlabeled_trainloader, test_loader,
             mixed_input = l * input_a + (1 - l) * input_b
             mixed_target = l * target_a + (1 - l) * target_b
             
-            # mixed_input = interleave(mixed_input, 3).to(args.device)
+            # mixed_input = interleave(mixed_input).to(args.device)
             # mixed_target = mixed_target.to(args.device)
 
             # logits = model(mixed_input)
-            # logits = de_interleave(logits, 3)
+            # logits = de_interleave(logits)
 
             # logits_x = logits[:batch_size]
             # logits_u = logits[batch_size:]
@@ -437,7 +448,8 @@ def train(args, labeled_trainloader, unlabeled_trainloader, test_loader,
 
             Lx, Lu, w = criterion(logits_x, mixed_target[:batch_size], logits_u, mixed_target[batch_size:], epoch+batch_idx/args.train_iteration, args)
 
-            loss = Lx + w * (ulb_batch_size / batch_size) * Lu
+            # loss = Lx + w * (ulb_batch_size / batch_size) * Lu
+            loss = Lx + w * Lu
 
             if args.amp:
                 with amp.scale_loss(loss, optimizer) as scaled_loss:
@@ -448,8 +460,9 @@ def train(args, labeled_trainloader, unlabeled_trainloader, test_loader,
             losses.update(loss.item())
             losses_x.update(Lx.item())
             losses_u.update(Lu.item())
+            ws.update(w, inputs_x.size(0))
+
             optimizer.step()
-            scheduler.step()
             if args.use_ema:
                 ema_model.update(model)
             model.zero_grad()
@@ -457,18 +470,17 @@ def train(args, labeled_trainloader, unlabeled_trainloader, test_loader,
             batch_time.update(time.time() - end)
             end = time.time()
             if not args.no_progress:
-                p_bar.set_description("Train Epoch: {epoch}/{epochs:4}. Iter: {batch:4}/{iter:4}. LR: {lr:.4f}. Data: {data:.3f}s. Batch: {bt:.3f}s. Loss: {loss:.4f}. Loss_x: {loss_x:.4f}. Loss_u: {loss_u:.4f}. W: {w:.4f}".format(
+                p_bar.set_description("Train Epoch: {epoch}/{epochs:4}. Iter: {batch:4}/{iter:4}. Data: {data:.3f}s. Batch: {bt:.3f}s. Loss: {loss:.4f}. Loss_x: {loss_x:.4f}. Loss_u: {loss_u:.4f}. W: {w:.4f}".format(
                     epoch=epoch + 1,
                     epochs=args.epochs,
                     batch=batch_idx + 1,
                     iter=args.train_iteration,
-                    lr=scheduler.get_last_lr()[0],
                     data=data_time.avg,
                     bt=batch_time.avg,
                     loss=losses.avg,
                     loss_x=losses_x.avg,
                     loss_u=losses_u.avg,
-                    w=w))
+                    w=ws.avg))
                 p_bar.update()
 
         epoch_time.update(time.time()-epoch_start)
@@ -505,7 +517,6 @@ def train(args, labeled_trainloader, unlabeled_trainloader, test_loader,
                 'acc': test_acc,
                 'best_acc': best_acc,
                 'optimizer': optimizer.state_dict(),
-                'scheduler': scheduler.state_dict(),
             }, is_best, args.out)
 
             test_accs.append(test_acc)

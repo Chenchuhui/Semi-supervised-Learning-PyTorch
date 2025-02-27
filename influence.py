@@ -1,3 +1,8 @@
+from typing import Any, Dict, List, Optional, Union
+
+from kronfluence.analyzer import Analyzer, prepare_model
+from kronfluence.task import Task
+
 import argparse
 import logging
 import math
@@ -5,14 +10,15 @@ import os
 import random
 import shutil
 import time
-from collections import OrderedDict, Counter
+from collections import OrderedDict
 
 import numpy as np
 import torch
+import torch.nn as nn
 import torch.nn.functional as F
 import torch.optim as optim
 from torch.optim.lr_scheduler import LambdaLR
-from torch.utils.data import DataLoader
+from torch.utils.data import DataLoader, RandomSampler, SequentialSampler
 from torch.utils.data.distributed import DistributedSampler
 from tensorboardX import SummaryWriter
 from tqdm import tqdm
@@ -20,6 +26,35 @@ from tqdm import tqdm
 from dataset.cv_dataset import DATASET_GETTERS
 from dataset.utils import CBSBatchSampler
 from utils import Bar, Logger, AverageMeter, accuracy, mkdir_p, savefig
+
+class SSLTask(Task):
+    def compute_train_loss(
+        self,
+        batch: Any,
+        model: nn.Module,
+        sample: bool = False,
+    ) -> torch.Tensor:
+        inputs_x, targets_x, _ = batch
+        logits_x = model(inputs_x)
+        Lx = F.cross_entropy(logits_x, targets_x, reduction='mean')
+        
+        return Lx
+
+    def compute_measurement(
+        self,
+        batch: Any,
+        model: nn.Module,
+    ) -> torch.Tensor:
+        # TODO: Complete this method.
+
+    def get_influence_tracked_modules(self) -> Optional[List[str]]:
+        # TODO: [Optional] Complete this method.
+        return None  # Compute influence scores on all available modules.
+
+    def get_attention_mask(self, batch: Any) -> Optional[Union[Dict[str, torch.Tensor], torch.Tensor]]:
+        # TODO: [Optional] Complete this method.
+        return None  # Attention mask not used.
+    
 
 logger = logging.getLogger(__name__)
 best_acc = 0
@@ -56,28 +91,25 @@ def get_cosine_schedule_with_warmup(optimizer,
     return LambdaLR(optimizer, _lr_lambda, last_epoch)
 
 
-def interleave(x, size):
+def interleave(x, group=2):
     s = list(x.shape)
+    size = x.shape[0] // group
     return x.reshape([-1, size] + s[1:]).transpose(0, 1).reshape([-1] + s[1:])
 
 
-def de_interleave(x, size):
+def de_interleave(x, group=2):
     s = list(x.shape)
+    size = x.shape[0] // group
     return x.reshape([size, -1] + s[1:]).transpose(0, 1).reshape([-1] + s[1:])
 
-def mapping_func(mode='convex'):
-    """Returnt he Mapping func."""
-    if mode == 'convex':
-        return lambda x: x / (2 - x)
-
 def main():
-    parser = argparse.ArgumentParser(description='PyTorch FlexMatch Training')
+    parser = argparse.ArgumentParser(description='PyTorch FixMatch Training')
     parser.add_argument('--gpu-id', default='0', type=int,
                         help='id(s) for CUDA_VISIBLE_DEVICES')
     parser.add_argument('--num-workers', type=int, default=4,
                         help='number of workers')
     parser.add_argument('--dataset', default='cifar10', type=str,
-                        choices=['cifar10', 'cifar100'],
+                        choices=['cifar10', 'cifar100', 'svhn', 'stl10'],
                         help='dataset name')
     parser.add_argument('--num-labeled', type=int, default=4000,
                         help='number of labeled data')
@@ -100,6 +132,8 @@ def main():
                         help='warmup epochs (unlabeled data based)')
     parser.add_argument('--wdecay', default=5e-4, type=float,
                         help='weight decay')
+    parser.add_argument('--CBS', action='store_true', default=True,
+                        help='use Circulum Batch Size. Faster Convergence')
     parser.add_argument('--nesterov', action='store_true', default=True,
                         help='use nesterov momentum')
     parser.add_argument('--use-ema', action='store_true', default=True,
@@ -108,12 +142,12 @@ def main():
                         help='EMA decay rate')
     parser.add_argument('--mu', default=7, type=int,
                         help='coefficient of unlabeled batch size')
-    parser.add_argument('--alpha', default=0.7, type=float,
-                        help='CBS index')
     parser.add_argument('--lambda-u', default=1, type=float,
                         help='coefficient of unlabeled loss')
     parser.add_argument('--T', default=1, type=float,
                         help='pseudo label temperature')
+    parser.add_argument('--alpha', default=0.7, type=float,
+                        help='CBS index')
     parser.add_argument('--img-size', type=int, default=32,
                         help='Image Size')
     parser.add_argument('--crop-ratio', type=float, default=0.875,
@@ -146,6 +180,7 @@ def main():
     def create_model(args):
         if args.arch == 'wideresnet':
             import models.wideresnet as models
+            print(args.num_classes)
             model = models.WideResNet(depth=args.model_depth,
                                             widen_factor=args.model_width,
                                             dropRate=0,
@@ -189,7 +224,7 @@ def main():
         os.makedirs(args.out, exist_ok=True)
         args.writer = SummaryWriter(args.out)
 
-    if args.dataset == 'cifar10':
+    if args.dataset in ['cifar10', 'svhn', 'stl10']:
         args.num_classes = 10
         if args.arch == 'wideresnet':
             args.model_depth = 28
@@ -208,16 +243,21 @@ def main():
             args.model_cardinality = 8
             args.model_depth = 29
             args.model_width = 64
+    
 
     if args.local_rank not in [-1, 0]:
         torch.distributed.barrier()
 
     labeled_dataset, unlabeled_dataset, test_dataset = DATASET_GETTERS[args.dataset](
         args, './data')
-    # labeled_set, unlabeled_set, val_set, test_set = dataset.get_cifar(args, 'fixmatch', args.dataset, args.num_labeled, args.num_classes, preaug=False)
     unlabeled_sampler = CBSBatchSampler(unlabeled_dataset, args.batch_size*args.mu, args.alpha, args.train_iteration, args.total_steps)
     labeled_trainloader = DataLoader(labeled_dataset, batch_size=args.batch_size, shuffle=True, num_workers=args.num_workers, drop_last=True)
-    unlabeled_trainloader = DataLoader(unlabeled_dataset, batch_sampler=unlabeled_sampler, num_workers=args.num_workers)
+    if args.CBS:
+        unlabeled_sampler = CBSBatchSampler(unlabeled_dataset, args.batch_size*args.mu, args.alpha, args.train_iteration, args.total_steps)
+        unlabeled_trainloader = DataLoader(unlabeled_dataset, batch_sampler=unlabeled_sampler, num_workers=args.num_workers)
+    else:
+        unlabeled_trainloader = DataLoader(unlabeled_dataset, batch_size=args.batch_size*args.mu, shuffle=True, num_workers=args.num_workers, drop_last=True)
+
     test_loader = DataLoader(test_dataset, batch_size=args.batch_size, shuffle=False, num_workers=0)
 
     if args.local_rank == 0:
@@ -289,16 +329,13 @@ def main():
         f"  Total train batch size = {args.batch_size*args.world_size}")
     logger.info(f"  Total optimization steps = {args.total_steps}")
 
-    learning_status = [-1] * len(unlabeled_trainloader.dataset)
-    mapping = mapping_func()
-    
     model.zero_grad()
     train(args, labeled_trainloader, unlabeled_trainloader, test_loader,
-          model, optimizer, ema_model, scheduler, log, learning_status, mapping, unlabeled_sampler)
+          model, optimizer, ema_model, scheduler, log, unlabeled_sampler)
 
 
 def train(args, labeled_trainloader, unlabeled_trainloader, test_loader,
-          model, optimizer, ema_model, scheduler, log, learning_status, mapping, ulb_sampler:CBSBatchSampler):
+          model, optimizer, ema_model, scheduler, log, ulb_sampler:CBSBatchSampler=None):
     if args.amp:
         from apex import amp
     global best_acc
@@ -313,10 +350,11 @@ def train(args, labeled_trainloader, unlabeled_trainloader, test_loader,
 
     labeled_iter = iter(labeled_trainloader)
     unlabeled_iter = iter(unlabeled_trainloader)
-    N = len(learning_status) # Number of unlabeled data
 
+    epoch_time = AverageMeter()
     model.train()
-    ulb_sampler.reset_epoch(args.start_epoch)
+    if ulb_sampler is not None:
+        ulb_sampler.reset_epoch(args.start_epoch)
     for epoch in range(args.start_epoch, args.epochs):
         epoch_start = time.time()
         batch_time = AverageMeter()
@@ -325,7 +363,8 @@ def train(args, labeled_trainloader, unlabeled_trainloader, test_loader,
         losses_x = AverageMeter()
         losses_u = AverageMeter()
         mask_probs = AverageMeter()
-        ulb_sampler.reset_epoch(epoch)
+        if ulb_sampler is not None:
+            ulb_sampler.reset_epoch(epoch)
         if not args.no_progress:
             p_bar = tqdm(range(args.train_iteration),
                          disable=args.local_rank not in [-1, 0])
@@ -344,7 +383,7 @@ def train(args, labeled_trainloader, unlabeled_trainloader, test_loader,
                 # inputs_x, targets_x = next(labeled_iter)
 
             try:
-                (inputs_u_w, inputs_u_s), _, u_i = next(unlabeled_iter)
+                (inputs_u_w, inputs_u_s), _, _ = next(unlabeled_iter)
                 # error occurs ↓
                 # (inputs_u_w, inputs_u_s), _ = next(unlabeled_iter)
             except:
@@ -353,10 +392,9 @@ def train(args, labeled_trainloader, unlabeled_trainloader, test_loader,
                     unlabeled_epoch += 1
                     unlabeled_trainloader.sampler.set_epoch(unlabeled_epoch)
                 unlabeled_iter = iter(unlabeled_trainloader)
-                (inputs_u_w, inputs_u_s), _, u_i = next(unlabeled_iter)
+                (inputs_u_w, inputs_u_s), _, _ = next(unlabeled_iter)
 
             data_time.update(time.time() - end)
-            cls_thresholds = torch.zeros(args.num_classes, device=args.device)
             batch_size = inputs_x.shape[0]
             ulb_batch_size = inputs_u_w.shape[0]
             inputs = interleave(
@@ -370,35 +408,9 @@ def train(args, labeled_trainloader, unlabeled_trainloader, test_loader,
 
             Lx = F.cross_entropy(logits_x, targets_x, reduction='mean')
 
-            # Compute a learning status
-            counter = Counter(learning_status)
-
-            num_unused = counter[-1]
-            if num_unused != N:
-                max_counter = max([counter[c] for c in range(args.num_classes)])
-                if max_counter < num_unused:
-                    sum_counter = sum([counter[c] for c in range(args.num_classes)])
-                    denominator = max(max_counter, N - sum_counter)
-                else:
-                    denominator = max_counter
-                
-                # threshold per class
-                for c in range(args.num_classes):
-                    beta = counter[c] / denominator
-                    cls_thresholds[c] = mapping(beta) * args.threshold
-
-            pseudo_label = torch.softmax(logits_u_w.detach()/args.T, dim=-1)
-            max_probs, targets_u = torch.max(pseudo_label, dim=-1)
-            over_threshold = max_probs > args.threshold
-            if over_threshold.any():
-                u_i = u_i.to(args.device)
-                sample_index = u_i[over_threshold].tolist()
-                pseudo_label = targets_u[over_threshold].tolist()
-                for i, l in zip(sample_index, pseudo_label):
-                    learning_status[i] = l
-            
-            batch_threshold = torch.index_select(cls_thresholds, 0, targets_u)
-            mask = max_probs >= batch_threshold
+            # pseudo_label = torch.softmax(logits_u_w.detach()/args.T, dim=-1)
+            # max_probs, targets_u = torch.max(pseudo_label, dim=-1)
+            # mask = max_probs.ge(args.threshold).float()
 
             Lu = (F.cross_entropy(logits_u_s, targets_u,
                                   reduction='none') * mask).mean()
@@ -422,7 +434,7 @@ def train(args, labeled_trainloader, unlabeled_trainloader, test_loader,
 
             batch_time.update(time.time() - end)
             end = time.time()
-            mask_probs.update(torch.mean(mask.float()).item())
+            mask_probs.update(mask.mean().item())
             if not args.no_progress:
                 p_bar.set_description("Train Epoch: {epoch}/{epochs:4}. Iter: {batch:4}/{iter:4}. LR: {lr:.4f}. Data: {data:.3f}s. Batch: {bt:.3f}s. Loss: {loss:.4f}. Loss_x: {loss_x:.4f}. Loss_u: {loss_u:.4f}. Mask: {mask:.2f}. ".format(
                     epoch=epoch + 1,
@@ -437,8 +449,8 @@ def train(args, labeled_trainloader, unlabeled_trainloader, test_loader,
                     loss_u=losses_u.avg,
                     mask=mask_probs.avg))
                 p_bar.update()
-        
-        epoch_time = time.time() - epoch_start
+
+        epoch_time.update(time.time()-epoch_start)
         if not args.no_progress:
             p_bar.close()
 
@@ -457,7 +469,7 @@ def train(args, labeled_trainloader, unlabeled_trainloader, test_loader,
             args.writer.add_scalar('test/1.test_acc', test_acc, epoch)
             args.writer.add_scalar('test/2.test_loss', test_loss, epoch)
 
-            log.append([losses.avg, losses_x.avg, losses_u.avg, test_loss, test_acc, epoch_time])
+            log.append([losses.avg, losses_x.avg, losses_u.avg, test_loss, test_acc, epoch_time.avg])
 
             is_best = test_acc > best_acc
             best_acc = max(test_acc, best_acc)

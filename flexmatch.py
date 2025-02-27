@@ -193,7 +193,7 @@ def main():
         os.makedirs(args.out, exist_ok=True)
         args.writer = SummaryWriter(args.out)
 
-    if args.dataset == 'cifar10' or 'svhn' or 'stl10':
+    if args.dataset in ['cifar10', 'svhn', 'stl10']:
         args.num_classes = 10
         if args.arch == 'wideresnet':
             args.model_depth = 28
@@ -319,11 +319,8 @@ def train(args, labeled_trainloader, unlabeled_trainloader, test_loader,
         labeled_trainloader.sampler.set_epoch(labeled_epoch)
         unlabeled_trainloader.sampler.set_epoch(unlabeled_epoch)
 
-    labeled_iter = iter(labeled_trainloader)
-    unlabeled_iter = iter(unlabeled_trainloader)
     N = len(learning_status) # Number of unlabeled data
 
-    model.train()
     ulb_sampler.reset_epoch(args.start_epoch)
     for epoch in range(args.start_epoch, args.epochs):
         epoch_start = time.time()
@@ -333,10 +330,15 @@ def train(args, labeled_trainloader, unlabeled_trainloader, test_loader,
         losses_x = AverageMeter()
         losses_u = AverageMeter()
         mask_probs = AverageMeter()
+
+        labeled_iter = iter(labeled_trainloader)
+        unlabeled_iter = iter(unlabeled_trainloader)
         ulb_sampler.reset_epoch(epoch)
         if not args.no_progress:
             p_bar = tqdm(range(args.train_iteration),
                          disable=args.local_rank not in [-1, 0])
+        
+        model.train()
         for batch_idx in range(args.train_iteration):
             try:
                 inputs_x, targets_x, _ = next(labeled_iter)
