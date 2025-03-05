@@ -54,6 +54,8 @@ parser.add_argument('--T', default=1, type=float,
                     help='pseudo label temperature')
 parser.add_argument('--alpha', default=0.7, type=float,
                     help='CBS index')
+parser.add_argument('--val_split', default=0.1, type=float,
+                        help='validation split')
 parser.add_argument('--img-size', type=int, default=32,
                     help='Image Size')
 parser.add_argument('--crop-ratio', type=float, default=0.875,
@@ -105,24 +107,17 @@ class SSLTask(Task):
     def compute_train_loss(self, batch: Any, model: nn.Module, sample: bool = False) -> torch.Tensor:
         """Compute loss for supervised training."""
         # batch = to_tensor(batch)  # Ensure batch elements are tensors
-        inputs_x, targets_x, _ = batch
-        logits_x = model(inputs_x)
-        Lx = F.cross_entropy(logits_x, targets_x, reduction='mean')
+        x_w, x_s, target = batch
+        logits_w = model(x_w)
+        logits_s = model(x_s)
+        Lx = F.cross_entropy(logits_w, target, reduction='mean') + F.cross_entropy(logits_s, target, reduction='mean')
         return Lx
 
     def compute_measurement(self, batch: Any, model: nn.Module) -> torch.Tensor:
-        """Compute per-sample consistency loss for influence computation."""
-        inputs, _, _ = batch
-        w_input, s_input = inputs  # Weak & strong augmented inputs
-
-        w_logits = model(w_input)  # Weak prediction
-        s_logits = model(s_input)  # Strong prediction
-
-        pseudo_labels = torch.softmax(w_logits.detach() / args.T, dim=-1)  # Detach pseudo-labels
-
-        # Compute per-sample consistency loss (individual values, NOT averaged)
-        L_consistency = torch.sum(-pseudo_labels * torch.log_softmax(s_logits, dim=-1), dim=-1)  # Shape: [batch_size]
-        return L_consistency.mean()  # Return per-sample values
+        inputs_v, targets_v, _ = batch
+        logits_v = model(inputs_v)
+        Lx = F.cross_entropy(logits_v, targets_v, reduction='mean')
+        return Lx
 
 
 logger = logging.getLogger(__name__)
@@ -146,8 +141,33 @@ elif args.dataset == 'cifar100':
         args.model_cardinality = 8
         args.model_depth = 29
         args.model_width = 64
-labeled_dataset, unlabeled_dataset, test_dataset = DATASET_GETTERS[args.dataset](
+labeled_dataset, unlabeled_dataset, val_dataset, test_dataset = DATASET_GETTERS[args.dataset](
         args, './data')
+
+unlabeled_images = [(img_w, img_s) for (img_w, img_s), _, _ in unlabeled_dataset]
+
+# Separate lists for img_w and img_s
+expanded_img_w = []
+expanded_img_s = []
+expanded_labels = []
+
+for (img_w, img_s) in unlabeled_images:
+    for label in range(10):
+        expanded_img_w.append(img_w)  # Weak augmentation
+        expanded_img_s.append(img_s)  # Strong augmentation
+        expanded_labels.append(label)
+
+# Convert lists to tensors
+expanded_img_w_tensor = torch.stack(expanded_img_w)  # Shape: (N, C, H, W)
+expanded_img_s_tensor = torch.stack(expanded_img_s)  # Shape: (N, C, H, W)
+expanded_labels_tensor = torch.tensor(expanded_labels)  # Shape: (N,)
+
+# Store as a dataset with multiple inputs
+unlabeled_expanded_dataset = torch.utils.data.TensorDataset(
+    expanded_img_w_tensor, expanded_img_s_tensor, expanded_labels_tensor
+)
+
+print(f"Expanded dataset size: {len(unlabeled_expanded_dataset)}")  # Should be 10x original size
 
 # Define the task. See the Technical Documentation page for details.
 task = SSLTask()
@@ -155,9 +175,9 @@ model = create_model(args)
 
 # Prepare the model for influence computation.
 model = prepare_model(model=model, task=task)
-analyzer = Analyzer(analysis_name="cifar10-Identity", model=model, task=task)
+analyzer = Analyzer(analysis_name="cifar10-ekfac-val", model=model, task=task)
 factor_args = FactorArguments(
-    strategy="identity",  # Choose from "identity", "diagonal", "kfac", or "ekfac".
+    strategy="ekfac",  # Choose from "identity", "diagonal", "kfac", or "ekfac".
     use_empirical_fisher=False,
     amp_dtype=None,
     amp_scale=2.0**16,
@@ -183,14 +203,14 @@ factor_args = FactorArguments(
     lambda_dtype=torch.float32,
 )
 # Fit all EKFAC factors for the given model.
-analyzer.fit_all_factors(factors_name="my_factors", dataset=labeled_dataset, factor_args=factor_args)
+analyzer.fit_all_factors(factors_name="my_factors", dataset=unlabeled_expanded_dataset, factor_args=factor_args)
 
 # Compute all pairwise influence scores with the computed factors.
 analyzer.compute_pairwise_scores(
     scores_name="my_scores",
     factors_name="my_factors",
-    query_dataset=unlabeled_dataset,
-    train_dataset=labeled_dataset,
+    query_dataset=val_dataset,
+    train_dataset=unlabeled_expanded_dataset,
     per_device_query_batch_size=1024,
 )
 

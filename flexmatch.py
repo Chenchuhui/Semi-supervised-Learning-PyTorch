@@ -114,6 +114,8 @@ def main():
                         help='coefficient of unlabeled batch size')
     parser.add_argument('--alpha', default=0.7, type=float,
                         help='CBS index')
+    parser.add_argument('--val_split', default=0.1, type=float,
+                        help='validation split')
     parser.add_argument('--lambda-u', default=1, type=float,
                         help='coefficient of unlabeled loss')
     parser.add_argument('--T', default=1, type=float,
@@ -216,7 +218,7 @@ def main():
     if args.local_rank not in [-1, 0]:
         torch.distributed.barrier()
 
-    labeled_dataset, unlabeled_dataset, test_dataset = DATASET_GETTERS[args.dataset](
+    labeled_dataset, unlabeled_dataset, _, test_dataset = DATASET_GETTERS[args.dataset](
         args, './data')
     unlabeled_sampler = CBSBatchSampler(unlabeled_dataset, args.batch_size*args.mu, args.alpha, args.train_iteration, args.total_steps)
     labeled_trainloader = DataLoader(labeled_dataset, batch_size=args.batch_size, shuffle=True, num_workers=args.num_workers, drop_last=True)
