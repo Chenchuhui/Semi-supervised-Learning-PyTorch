@@ -296,9 +296,8 @@ def train(labeled_trainloader, unlabeled_trainloader, model, optimizer, ema_opti
         # logits_u = torch.cat(logits[1:], dim=0)
 
         mixed_input = torch.split(mixed_input, [batch_size, ulb_batch_size, ulb_batch_size])
-        inputs = interleave(torch.cat((mixed_input[0], mixed_input[1], mixed_input[2])), 2).to(args.device)
+        inputs = interleave(torch.cat((mixed_input[0], mixed_input[1], mixed_input[2])), 2).cuda()
 
-        mixed_target = mixed_target.to(args.device)
         logits = model(inputs)
         logits = de_interleave(logits, 2)
         logits_x = logits[:batch_size]
