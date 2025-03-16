@@ -67,6 +67,8 @@ parser.add_argument('--alpha', default=0.75, type=float)
 parser.add_argument('--lambda-u', default=75, type=float)
 parser.add_argument('--T', default=0.5, type=float)
 parser.add_argument('--ema-decay', default=0.999, type=float)
+parser.add_argument('--val_split', default=0.1, type=float,
+                        help='validation split')
 
 
 args = parser.parse_args()
@@ -113,7 +115,7 @@ def main():
         args.model_depth = 28
         args.model_width = 2
 
-    labeled_set, unlabeled_set, test_set = DATASET_GETTERS[args.dataset](
+    labeled_set, unlabeled_set, _, test_set = DATASET_GETTERS[args.dataset](
         args, './data') 
     # labeled_subset = data.Subset(labeled_set, range(args.num_labeled))
     labeled_trainloader = data.DataLoader(labeled_set, batch_size=args.batch_size, shuffle=True, num_workers=args.num_workers, drop_last=True)
@@ -242,6 +244,8 @@ def train(labeled_trainloader, unlabeled_trainloader, model, optimizer, ema_opti
         data_time.update(time.time() - end)
 
         batch_size = inputs_x.size(0)
+        ulb_batch_size = inputs_u.shape[0]
+
 
         # Transform label to one-hot
         targets_x = torch.zeros(batch_size, 10).scatter_(1, targets_x.view(-1,1).long(), 1)
@@ -279,17 +283,27 @@ def train(labeled_trainloader, unlabeled_trainloader, model, optimizer, ema_opti
         mixed_target = l * target_a + (1 - l) * target_b
 
         # interleave labeled and unlabed samples between batches to get correct batchnorm calculation 
-        mixed_input = list(torch.split(mixed_input, batch_size))
-        mixed_input = interleave(mixed_input, batch_size)
+        # mixed_input = list(torch.split(mixed_input, batch_size))
+        # mixed_input = interleave(mixed_input, batch_size)
 
-        logits = [model(mixed_input[0])]
-        for input in mixed_input[1:]:
-            logits.append(model(input))
+        # logits = [model(mixed_input[0])]
+        # for input in mixed_input[1:]:
+        #     logits.append(model(input))
 
-        # put interleaved samples back
-        logits = interleave(logits, batch_size)
-        logits_x = logits[0]
-        logits_u = torch.cat(logits[1:], dim=0)
+        # # put interleaved samples back
+        # logits = interleave(logits, batch_size)
+        # logits_x = logits[0]
+        # logits_u = torch.cat(logits[1:], dim=0)
+
+        mixed_input = torch.split(mixed_input, [batch_size, ulb_batch_size, ulb_batch_size])
+        inputs = interleave(torch.cat((mixed_input[0], mixed_input[1], mixed_input[2])), 2).to(args.device)
+
+        mixed_target = mixed_target.to(args.device)
+        logits = model(inputs)
+        logits = de_interleave(logits, 2)
+        logits_x = logits[:batch_size]
+        logits_u = logits[batch_size:]
+        del logits
 
         Lx, Lu, w = criterion(logits_x, mixed_target[:batch_size], logits_u, mixed_target[batch_size:], epoch+batch_idx/args.train_iteration)
 
@@ -423,24 +437,35 @@ class WeightEMA(object):
                 # customized weight decay
                 param.mul_(1 - self.wd)
 
-def interleave_offsets(batch, nu):
-    groups = [batch // (nu + 1)] * (nu + 1)
-    for x in range(batch - sum(groups)):
-        groups[-x - 1] += 1
-    offsets = [0]
-    for g in groups:
-        offsets.append(offsets[-1] + g)
-    assert offsets[-1] == batch
-    return offsets
+# def interleave_offsets(batch, nu):
+#     groups = [batch // (nu + 1)] * (nu + 1)
+#     for x in range(batch - sum(groups)):
+#         groups[-x - 1] += 1
+#     offsets = [0]
+#     for g in groups:
+#         offsets.append(offsets[-1] + g)
+#     assert offsets[-1] == batch
+#     return offsets
 
 
-def interleave(xy, batch):
-    nu = len(xy) - 1
-    offsets = interleave_offsets(batch, nu)
-    xy = [[v[offsets[p]:offsets[p + 1]] for p in range(nu + 1)] for v in xy]
-    for i in range(1, nu + 1):
-        xy[0][i], xy[i][i] = xy[i][i], xy[0][i]
-    return [torch.cat(v, dim=0) for v in xy]
+# def interleave(xy, batch):
+#     nu = len(xy) - 1
+#     offsets = interleave_offsets(batch, nu)
+#     xy = [[v[offsets[p]:offsets[p + 1]] for p in range(nu + 1)] for v in xy]
+#     for i in range(1, nu + 1):
+#         xy[0][i], xy[i][i] = xy[i][i], xy[0][i]
+#     return [torch.cat(v, dim=0) for v in xy]
+
+def interleave(x, group=2):
+    s = list(x.shape)
+    size = x.shape[0] // group
+    return x.reshape([-1, size] + s[1:]).transpose(0, 1).reshape([-1] + s[1:])
+
+
+def de_interleave(x, group=2):
+    s = list(x.shape)
+    size = x.shape[0] // group
+    return x.reshape([size, -1] + s[1:]).transpose(0, 1).reshape([-1] + s[1:])
 
 if __name__ == '__main__':
     main()
