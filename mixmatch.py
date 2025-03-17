@@ -103,19 +103,19 @@ def main():
         args.num_classes = 10
         args.model_depth = 28
         args.model_width = 2
-        # elif args.arch == 'resnext':
-        #     args.model_cardinality = 4
-        #     args.model_depth = 28
-        #     args.model_width = 4
+    # elif args.arch == 'resnext':
+    #     args.model_cardinality = 4
+    #     args.model_depth = 28
+    #     args.model_width = 4
 
     elif args.dataset == 'cifar100':
         args.num_classes = 100
         args.model_depth = 28
         args.model_width = 8
-        # elif args.arch == 'resnext':
-        #     args.model_cardinality = 8
-        #     args.model_depth = 29
-        #     args.model_width = 64
+    # elif args.arch == 'resnext':
+    #     args.model_cardinality = 8
+    #     args.model_depth = 29
+    #     args.model_width = 64
     elif args.dataset == 'svhn':
         args.num_classes = 10
         args.model_depth = 28
@@ -126,7 +126,7 @@ def main():
     unlabeled_sampler = None
     labeled_trainloader = data.DataLoader(labeled_set, batch_size=args.batch_size, shuffle=True, num_workers=args.num_workers, drop_last=True)
     if args.CBS:
-        unlabeled_sampler = CBSBatchSampler(unlabeled_set, args.batch_size, args.alpha, args.train_iteration, args.total_steps)
+        unlabeled_sampler = CBSBatchSampler(unlabeled_set, args.batch_size, args.CBS_alpha, args.train_iteration, args.epochs * args.train_iteration)
         unlabeled_trainloader = data.DataLoader(unlabeled_set, batch_sampler=unlabeled_sampler, num_workers=args.num_workers)
     else:
         unlabeled_trainloader = data.DataLoader(unlabeled_set, batch_size=args.batch_size, shuffle=True, num_workers=args.num_workers, drop_last=True)
