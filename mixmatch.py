@@ -19,6 +19,7 @@ import torch.nn.functional as F
 
 import models.wideresnet as models
 from dataset.cv_dataset import DATASET_GETTERS
+from dataset.utils import CBSBatchSampler
 from utils import Bar, Logger, AverageMeter, accuracy, mkdir_p, savefig
 from tensorboardX import SummaryWriter
 
@@ -34,7 +35,12 @@ parser.add_argument('--lr', '--learning-rate', default=0.002, type=float,
                     metavar='LR', help='initial learning rate')
 parser.add_argument('--dataset', default='cifar10', type=str)
 parser.add_argument('--num-workers', type=int, default=4,
-                        help='number of workers')
+                    help='number of workers')
+
+parser.add_argument('--CBS', action='store_true', default=False,
+                    help='use Circulum Batch Size. Faster Convergence')
+parser.add_argument('--CBS-alpha', default=0.7, type=float,
+                    help='CBS index')
 
 # Preload augmented data
 parser.add_argument('--preaug', action='store_true', 
@@ -116,11 +122,14 @@ def main():
         args.model_width = 2
 
     labeled_set, unlabeled_set, _, test_set = DATASET_GETTERS[args.dataset](
-        args, './data') 
-    # labeled_subset = data.Subset(labeled_set, range(args.num_labeled))
+        args, './data')
+    unlabeled_sampler = None
     labeled_trainloader = data.DataLoader(labeled_set, batch_size=args.batch_size, shuffle=True, num_workers=args.num_workers, drop_last=True)
-    # train_eval_loader = data.DataLoader(labeled_subset, batch_size=args.num_labeled, shuffle=False, num_workers=args.num_workers)
-    unlabeled_trainloader = data.DataLoader(unlabeled_set, batch_size=args.batch_size, shuffle=True, num_workers=args.num_workers, drop_last=True)
+    if args.CBS:
+        unlabeled_sampler = CBSBatchSampler(unlabeled_set, args.batch_size, args.alpha, args.train_iteration, args.total_steps)
+        unlabeled_trainloader = data.DataLoader(unlabeled_set, batch_sampler=unlabeled_sampler, num_workers=args.num_workers)
+    else:
+        unlabeled_trainloader = data.DataLoader(unlabeled_set, batch_size=args.batch_size, shuffle=True, num_workers=args.num_workers, drop_last=True)
     test_loader = data.DataLoader(test_set, batch_size=args.batch_size, shuffle=False, num_workers=args.num_workers)
 
     # Model
@@ -170,12 +179,15 @@ def main():
     writer = SummaryWriter(args.out)
     step = 0
     test_accs = []
+
+    if unlabeled_sampler is not None:
+        unlabeled_sampler.reset_epoch(args.start_epoch)
     # Train and val
     for epoch in range(start_epoch, args.epochs):
 
         print('\nEpoch: [%d | %d] LR: %f' % (epoch + 1, args.epochs, state['lr']))
 
-        train_loss, train_loss_x, train_loss_u = train(labeled_trainloader, unlabeled_trainloader, model, optimizer, ema_optimizer, train_criterion, epoch, use_cuda)
+        train_loss, train_loss_x, train_loss_u = train(labeled_trainloader, unlabeled_trainloader, model, optimizer, ema_optimizer, train_criterion, epoch, use_cuda, unlabeled_sampler)
         # _, train_acc = validate(train_eval_loader, ema_model, criterion, epoch, use_cuda, mode='Train Stats')
         test_loss, test_acc = validate(test_loader, ema_model, criterion, epoch, use_cuda, mode='Test Stats ')
 
@@ -212,7 +224,7 @@ def main():
     print(np.mean(test_accs[-20:]))
 
 
-def train(labeled_trainloader, unlabeled_trainloader, model, optimizer, ema_optimizer, criterion, epoch, use_cuda):
+def train(labeled_trainloader, unlabeled_trainloader, model, optimizer, ema_optimizer, criterion, epoch, use_cuda, ulb_sampler: CBSBatchSampler=None):
 
     batch_time = AverageMeter()
     data_time = AverageMeter()
@@ -226,6 +238,8 @@ def train(labeled_trainloader, unlabeled_trainloader, model, optimizer, ema_opti
     labeled_train_iter = iter(labeled_trainloader)
     unlabeled_train_iter = iter(unlabeled_trainloader)
 
+    if ulb_sampler is not None:
+        ulb_sampler.reset_epoch(epoch)
     model.train()
     for batch_idx in range(args.train_iteration):
         try:
