@@ -124,12 +124,12 @@ def main():
     labeled_set, unlabeled_set, _, test_set = DATASET_GETTERS[args.dataset](
         args, './data')
     unlabeled_sampler = None
-    labeled_trainloader = data.DataLoader(labeled_set, batch_size=args.batch_size, shuffle=True, num_workers=args.num_workers, drop_last=True)
+    labeled_trainloader = data.DataLoader(labeled_set, batch_size=args.batch_size, shuffle=True, num_workers=args.num_workers, drop_last=True, prefetch_factor=2, pin_memory=True)
     if args.CBS:
         unlabeled_sampler = CBSBatchSampler(unlabeled_set, args.batch_size, args.CBS_alpha, args.train_iteration, args.epochs * args.train_iteration)
         unlabeled_trainloader = data.DataLoader(unlabeled_set, batch_sampler=unlabeled_sampler, num_workers=args.num_workers)
     else:
-        unlabeled_trainloader = data.DataLoader(unlabeled_set, batch_size=args.batch_size, shuffle=True, num_workers=args.num_workers, drop_last=True)
+        unlabeled_trainloader = data.DataLoader(unlabeled_set, batch_size=args.batch_size, shuffle=True, num_workers=args.num_workers, drop_last=True, prefetch_factor=2, pin_memory=True)
     test_loader = data.DataLoader(test_set, batch_size=args.batch_size, shuffle=False, num_workers=args.num_workers)
 
     # Model
@@ -251,6 +251,7 @@ def train(labeled_trainloader, unlabeled_trainloader, model, optimizer, ema_opti
         try:
             (inputs_u, inputs_u2), _, _ = next(unlabeled_train_iter)
         except:
+            print("unlabeled data exhausted")
             unlabeled_train_iter = iter(unlabeled_trainloader)
             (inputs_u, inputs_u2), _, _ = next(unlabeled_train_iter)
 
@@ -262,7 +263,7 @@ def train(labeled_trainloader, unlabeled_trainloader, model, optimizer, ema_opti
 
 
         # Transform label to one-hot
-        targets_x = torch.zeros(batch_size, 10).scatter_(1, targets_x.view(-1,1).long(), 1)
+        targets_x = torch.zeros(batch_size, args.num_classes).scatter_(1, targets_x.view(-1,1).long(), 1)
 
         if use_cuda:
             inputs_x, targets_x = inputs_x.cuda(), targets_x.cuda(non_blocking=True)
@@ -320,7 +321,7 @@ def train(labeled_trainloader, unlabeled_trainloader, model, optimizer, ema_opti
 
         Lx, Lu, w = criterion(logits_x, mixed_target[:batch_size], logits_u, mixed_target[batch_size:], epoch+batch_idx/args.train_iteration)
 
-        loss = Lx + w * Lu
+        loss = Lx + w * (ulb_batch_size / batch_size) * Lu
 
         # record loss
         losses.update(loss.item(), inputs_x.size(0))

@@ -36,7 +36,7 @@ def get_cifar10(args, root):
 
     train_labeled_idxs, train_unlabeled_idxs, val_idxs = x_u_split(
         args, base_dataset.targets, args.val_split)
-
+    
     if not args.preaug:
         train_labeled_dataset = CIFAR10SSL(
             root, train_labeled_idxs, train=True,
@@ -148,7 +148,7 @@ class UnlabeledTransform(object):
             transforms.RandomCrop(size=32,
                                   padding=int(crop_size * (1 - crop_ratio)),
                                   padding_mode='reflect'),
-            # RandAugment(n=3, m=5)
+            RandAugment(n=3, m=5)
             ])
         self.normalize = transforms.Compose([
             transforms.ToTensor(),

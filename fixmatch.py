@@ -97,7 +97,7 @@ def main():
                         help='warmup epochs (unlabeled data based)')
     parser.add_argument('--wdecay', default=5e-4, type=float,
                         help='weight decay')
-    parser.add_argument('--CBS', action='store_true', default=True,
+    parser.add_argument('--CBS', action='store_true',
                         help='use Circulum Batch Size. Faster Convergence')
     parser.add_argument('--nesterov', action='store_true', default=True,
                         help='use nesterov momentum')
