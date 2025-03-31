@@ -1,5 +1,6 @@
 .DS_Store
 /data
 dataset/__pycache__/
-fixmatch_deprecated.py
 influence_results
+influence_scores
+influence_scores_seed4

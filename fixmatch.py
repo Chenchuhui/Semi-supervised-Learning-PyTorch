@@ -480,7 +480,6 @@ def test(args, test_loader, model, epoch):
         for batch_idx, (inputs, targets) in enumerate(test_loader):
             data_time.update(time.time() - end)
             model.eval()
-
             inputs = inputs.to(args.device)
             targets = targets.to(args.device)
             outputs = model(inputs)

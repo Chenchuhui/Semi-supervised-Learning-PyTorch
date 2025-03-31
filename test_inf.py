@@ -1,9 +1,8 @@
 import torch
-import torchvision
 from torch import nn
 import torch.nn.functional as F
 from kronfluence.task import Task
-from typing import Any, Dict, List, Optional, Union
+from typing import Any
 from kronfluence.arguments import FactorArguments
 
 from kronfluence.analyzer import Analyzer, prepare_model
@@ -85,6 +84,10 @@ args = parser.parse_args()
 
 device = torch.device(f'cuda:{args.gpu_id}' if torch.cuda.is_available() else 'cpu')
 
+# Initialize logger
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
+
 # Define the model and load the trained model weights.
 def create_model(args):
     if args.arch == 'wideresnet':
@@ -119,8 +122,6 @@ class SSLTask(Task):
         Lx = F.cross_entropy(logits_v, targets_v, reduction='mean')
         return Lx
 
-
-logger = logging.getLogger(__name__)
 
 if args.dataset in ['cifar10', 'svhn', 'stl10']:
         args.num_classes = 10

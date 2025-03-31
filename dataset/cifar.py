@@ -128,9 +128,9 @@ def x_u_split(args, labels, split=0.1):
         num_expand_x = math.ceil(
             args.batch_size * args.train_iteration / args.num_labeled)
         labeled_idx = np.hstack([labeled_idx for _ in range(num_expand_x)])
-        num_expand_ulb_x = math.ceil(
-            args.batch_size * args.train_iteration / len(labels))
-        unlabeled_idx = np.hstack([unlabeled_idx for _ in range(num_expand_ulb_x)])
+        # num_expand_ulb_x = math.ceil(
+        #     args.batch_size * args.train_iteration / len(labels))
+        # unlabeled_idx = np.hstack([unlabeled_idx for _ in range(num_expand_ulb_x)])
     np.random.shuffle(labeled_idx)
     np.random.shuffle(unlabeled_idx)
     return labeled_idx, unlabeled_idx, val_idx

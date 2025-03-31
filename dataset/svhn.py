@@ -30,8 +30,8 @@ def get_svhn(args, root):
     ])
     base_dataset = datasets.SVHN(root, split='train', download=True)
 
-    train_labeled_idxs, train_unlabeled_idxs = x_u_split(
-        args, base_dataset.labels)
+    train_labeled_idxs, train_unlabeled_idxs, val_idxs = x_u_split(
+        args, base_dataset.labels, args.val_split)
 
     if not args.preaug:
         train_labeled_dataset = SVHNSSL(
@@ -52,34 +52,43 @@ def get_svhn(args, root):
             root, train_unlabeled_idxs, is_ulb=True, batch_size=args.batch_size, iteration=args.train_iteration, rep=args.rep, split='train',
             transform=UnlabeledTransform(mean=svhn_mean, std=svhn_std, crop_size=args.img_size, crop_ratio=args.crop_ratio))
 
+    val_dataset = SVHNSSL(
+            root, val_idxs, split="train",
+            transform=transform_val)
+    
     test_dataset = datasets.SVHN(
         root, split='test', transform=transform_val, download=True)
 
-    return train_labeled_dataset, train_unlabeled_dataset, test_dataset
+    return train_labeled_dataset, train_unlabeled_dataset, val_dataset, test_dataset
 
-def x_u_split(args, labels):
+def x_u_split(args, labels, split=0.1):
     label_per_class = args.num_labeled // args.num_classes
     labels = np.array(labels)
+    val_per_class = int(len(labels)*split) // args.num_classes
     labeled_idx = []
+    val_idx = []
     # unlabeled data: all data (https://github.com/kekmodel/FixMatch-pytorch/issues/10)
     unlabeled_idx = np.array(range(len(labels)))
     for i in range(args.num_classes):
         idx = np.where(labels == i)[0]
-        idx = np.random.choice(idx, label_per_class, False)
-        labeled_idx.extend(idx)
+        l_idx = np.random.choice(idx, label_per_class, False)
+        remaining_idx = np.setdiff1d(idx, l_idx)
+        v_idx = np.random.choice(remaining_idx, val_per_class, False)
+        labeled_idx.extend(l_idx)
+        val_idx.extend(v_idx)
     labeled_idx = np.array(labeled_idx)
+    val_idx = np.array(val_idx)
     assert len(labeled_idx) == args.num_labeled
+
+    unlabeled_idx = np.setdiff1d(unlabeled_idx, np.hstack([val_idx]))
 
     if args.expand_labels or args.num_labeled < args.batch_size:
         num_expand_x = math.ceil(
             args.batch_size * args.train_iteration / args.num_labeled)
         labeled_idx = np.hstack([labeled_idx for _ in range(num_expand_x)])
-        num_expand_ulb_x = math.ceil(
-            args.batch_size * args.train_iteration / len(labels))
-        unlabeled_idx = np.hstack([unlabeled_idx for _ in range(num_expand_ulb_x)])
     np.random.shuffle(labeled_idx)
     np.random.shuffle(unlabeled_idx)
-    return labeled_idx, unlabeled_idx
+    return labeled_idx, unlabeled_idx, val_idx
 
 
 class UnlabeledTransform(object):
