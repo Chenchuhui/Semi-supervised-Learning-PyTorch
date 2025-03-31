@@ -19,13 +19,15 @@ from PIL import Image
 
 def get_stl10(args, root):
     transform_labeled = transforms.Compose([
+        transforms.Resize(args.img_size),
         transforms.RandomHorizontalFlip(),
-        transforms.RandomCrop(size=96, padding=12, padding_mode='reflect'),
+        transforms.RandomCrop(size=args.img_size, padding=int(args.img_size * (1 - args.crop_ratio)), padding_mode='reflect'),
         transforms.ToTensor(),
         transforms.Normalize(mean=stl10_mean, std=stl10_std)
     ])
     
     transform_val = transforms.Compose([
+        transforms.Resize(32),
         transforms.ToTensor(),
         transforms.Normalize(mean=stl10_mean, std=stl10_std)
     ])
@@ -86,13 +88,15 @@ def x_u_split(args, labels, split=0.1):
     return labeled_idx, unlabeled_idx, val_idx
 
 class UnlabeledTransform(object):
-    def __init__(self, mean, std, crop_size, crop_ratio):
+    def __init__(self, mean, std, crop_size, crop_ratio, args):
         self.weak = transforms.Compose([
+            transforms.Resize(crop_size),
             transforms.RandomHorizontalFlip(),
-            transforms.RandomCrop(size=96, padding=int(crop_size * (1 - crop_ratio)), padding_mode='reflect')])
+            transforms.RandomCrop(size=crop_size, padding=int(crop_size * (1 - crop_ratio)), padding_mode='reflect')])
         self.strong = transforms.Compose([
+            transforms.Resize(crop_size),
             transforms.RandomHorizontalFlip(),
-            transforms.RandomCrop(size=96, padding=int(crop_size * (1 - crop_ratio)), padding_mode='reflect'),
+            transforms.RandomCrop(size=crop_size, padding=int(crop_size * (1 - crop_ratio)), padding_mode='reflect'),
             RandAugment(n=3, m=5)])
         self.normalize = transforms.Compose([
             transforms.ToTensor(),
