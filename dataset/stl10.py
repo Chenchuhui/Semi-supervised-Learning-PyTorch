@@ -88,7 +88,7 @@ def x_u_split(args, labels, split=0.1):
     return labeled_idx, unlabeled_idx, val_idx
 
 class UnlabeledTransform(object):
-    def __init__(self, mean, std, crop_size, crop_ratio, args):
+    def __init__(self, mean, std, crop_size, crop_ratio):
         self.weak = transforms.Compose([
             transforms.Resize(crop_size),
             transforms.RandomHorizontalFlip(),

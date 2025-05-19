@@ -26,7 +26,7 @@ from tqdm import tqdm
 
 from dataset.cv_dataset import DATASET_GETTERS
 from dataset.cifar import CIFAR10SSL, CIFAR100SSL
-from dataset.utils import CBSBatchSampler
+from dataset.utils import CBSBatchSampler, CBS
 from utils import Bar, Logger, AverageMeter, accuracy, mkdir_p, savefig
 from torch.utils.data import TensorDataset
 
@@ -34,18 +34,23 @@ class SSLTask(Task):
     def compute_train_loss(self, batch: Any, model: nn.Module, sample: bool = False) -> torch.Tensor:
         """Compute loss for supervised training."""
         # batch = to_tensor(batch)  # Ensure batch elements are tensors
-        x_w, x_s, target, _ = batch
+        x_w, target, _ = batch
         logits_w = model(x_w)
-        logits_s = model(x_s)
-        Lx = F.cross_entropy(logits_w, target, reduction='mean') + F.cross_entropy(logits_s, target, reduction='mean')
-        return Lx
-
-    def compute_measurement(self, batch: Any, model: nn.Module) -> torch.Tensor:
-        inputs_v, targets_v, _ = batch
-        logits_v = model(inputs_v)
-        Lx = F.cross_entropy(logits_v, targets_v, reduction='mean')
+        Lx = F.cross_entropy(logits_w, target, reduction='sum')
         return Lx
     
+    def compute_measurement(self, batch, model):
+        inputs, labels = batch
+        logits = model(inputs)
+
+        bindex = torch.arange(logits.shape[0]).to(device=logits.device, non_blocking=False)
+        logits_correct = logits[bindex, labels]
+
+        cloned_logits = logits.clone()
+        cloned_logits[bindex, labels] = torch.tensor(-torch.inf, device=logits.device, dtype=logits.dtype)
+
+        margins = logits_correct - cloned_logits.logsumexp(dim=-1)
+        return -margins.sum()
 
 logger = logging.getLogger(__name__)
 best_acc = 0
@@ -92,6 +97,13 @@ def de_interleave(x, group=2):
     s = list(x.shape)
     size = x.shape[0] // group
     return x.reshape([size, -1] + s[1:]).transpose(0, 1).reshape([-1] + s[1:])
+
+def linear_rampup(current, rampup_length):
+    if rampup_length == 0:
+        return 1.0
+    else:
+        current = np.clip(current / rampup_length, 0.0, 1.0)
+        return float(current)
 
 def main():
     parser = argparse.ArgumentParser(description='PyTorch FixMatch Training')
@@ -271,39 +283,13 @@ def main():
     labeled_dataset, unlabeled_dataset, val_dataset, test_dataset = DATASET_GETTERS[args.dataset](
         args, './data')
     
-    # Expand unlabeled dataset: each unlabeled sample is repeated for each labele
-    unlabeled_images = [(img_w, img_s, ground_truth) for (img_w, img_s), ground_truth, _ in unlabeled_dataset]
-    # Separate lists for img_w and img_s
-    expanded_img_w = []
-    expanded_img_s = []
-    expanded_labels = []
-    ground_truths = []
-
-    for (img_w, img_s, gt) in unlabeled_images:
-        for label in range(args.num_classes):
-            expanded_img_w.append(img_w)
-            expanded_img_s.append(img_s)
-            expanded_labels.append(label)
-            ground_truths.append(gt)
+    # Set unlabeled dataset target to -1
+    unlabeled_dataset.targets = [-1] * len(unlabeled_dataset)
     
-    # Convert lists to tensors
-    expanded_img_w = torch.stack(expanded_img_w)
-    expanded_img_s = torch.stack(expanded_img_s)
-    expanded_labels = torch.tensor(expanded_labels)
-    ground_truths = torch.tensor(ground_truths)
-
-    # Create new unlabeled dataset using TensorDataset
-    unlabeled_dataset = TensorDataset(expanded_img_w, expanded_img_s, expanded_labels, ground_truths)
-
     # print unlabeled dataset size
     print(f"Unlabeled dataset size: {len(unlabeled_dataset)}")
     # unlabeled_sampler = CBSBatchSampler(unlabeled_expanded_dataset, args.batch_size*args.mu, args.alpha, args.train_iteration, args.total_steps)
     labeled_trainloader = DataLoader(labeled_dataset, batch_size=args.batch_size, shuffle=True, num_workers=args.num_workers, drop_last=True)
-    # if args.CBS:
-    #     unlabeled_sampler = CBSBatchSampler(unlabeled_expanded_dataset, args.batch_size*args.mu, args.alpha, args.train_iteration, args.total_steps)
-    #     unlabeled_trainloader = DataLoader(unlabeled_dataset, batch_sampler=unlabeled_sampler, num_workers=args.num_workers)
-    # else:
-    #     unlabeled_trainloader = DataLoader(unlabeled_dataset, batch_size=args.batch_size*args.mu, shuffle=True, num_workers=args.num_workers, drop_last=True)
 
     test_loader = DataLoader(test_dataset, batch_size=args.batch_size, shuffle=False, num_workers=0)
 
@@ -342,6 +328,8 @@ def main():
 
     args.start_epoch = 0
 
+    unlabeled_labeled_indices = []
+
     if args.resume:
         logger.info("==> Resuming from checkpoint..")
         assert os.path.isfile(
@@ -356,9 +344,24 @@ def main():
         optimizer.load_state_dict(checkpoint['optimizer'])
         scheduler.load_state_dict(checkpoint['scheduler'])
         log = Logger(os.path.join(args.out, 'log.txt'), resume=True)
+        
+        # If there is a file unlabeled_labeled_indices.txt, load the indices
+        if os.path.exists(f"{args.out}/unlabeled_labeled_indices.txt"):
+            with open(f"{args.out}/unlabeled_labeled_indices.txt", "r") as f:
+                labels = []
+                for line in f:
+                    index, label, gt = line.strip().split(", ")
+                    unlabeled_labeled_indices.append(int(index))
+                    labels.append(int(label))
+                unlabeled_labeled_indices = list(set(unlabeled_labeled_indices))
+                print(f"Unlabeled labeled indices: {unlabeled_labeled_indices}")
+                # Update the targets of the unlabeled dataset
+                if isinstance(unlabeled_dataset.targets, list):
+                    unlabeled_dataset.targets = torch.tensor(unlabeled_dataset.targets)
+                unlabeled_dataset.targets[unlabeled_labeled_indices] = torch.tensor(labels, dtype=torch.long)
     else:
         log = Logger(os.path.join(args.out, 'log.txt'))
-        log.set_names(['Train Loss', 'Train Loss X', 'Train Loss U', 'Test Loss', 'Test Acc.', 'Epoch Time'])
+        log.set_names(['Train Loss', 'Train Loss X', 'Train Loss U', 'Val Loss', 'Val Acc.', 'Test Loss', 'Test Acc.', 'Epoch Time'])
 
     # Ensure the output directory exists
     os.makedirs(args.out, exist_ok=True)
@@ -386,16 +389,85 @@ def main():
     print("start epch", args.start_epoch)
     if args.start_epoch < args.warmup:
         train(args, labeled_trainloader, unlabeled_dataset, val_dataset, test_loader,
-            model, optimizer, ema_model, scheduler, log, warmup=True)
+            model, optimizer, ema_model, scheduler, log, warmup=True, unlabeled_labeled_indices=unlabeled_labeled_indices)
         args.start_epoch = args.warmup
     
     # Train the model with labeled and unlabeled data
     train(args, labeled_trainloader, unlabeled_dataset, val_dataset, test_loader,
-          model, optimizer, ema_model, scheduler, log, warmup=False)
+          model, optimizer, ema_model, scheduler, log, warmup=False, unlabeled_labeled_indices=unlabeled_labeled_indices)
+
+import matplotlib.pyplot as plt
+
+def visualize(scores, ds_val, ds_train, descending=True):
+    val_indices = [2000, 2001, 2002, 2003, 2004, 2005, 2006, 2007, 2008, 2009, 2010, 2011, 2012, 2013, 2014, 2015, 2016, 2017, 2018, 2019, 2020, 2021, 2022, 2023, 2024, 2025, 2026, 2027, 2028, 2029]
     
-def updated_ulb_dataset(unlabeled_dataset, val_dataset, model, args, epoch):
+    for i in val_indices:
+        fig, axs = plt.subplots(ncols=7, figsize=(15, 3))
+        fig.suptitle("Top Influential Training Images")
+
+        # Get query image and label
+        query_img, query_label = ds_val[i]
+        query_img = query_img.permute(1, 2, 0)  # (C, H, W) -> (H, W, C)
+
+        axs[0].imshow(query_img)
+        axs[0].axis("off")
+        axs[0].set_title(f"Query\nLabel: {query_label}")
+
+        axs[1].axis("off")  # Spacer column
+
+        # Get top 5 influential training sample indices
+        top_idxs = scores['all_modules'][i].argsort(descending=descending)[:5]
+
+        for ii, idx in enumerate(top_idxs):
+            train_img, train_label, gt = ds_train[idx]
+            train_img = train_img.permute(1, 2, 0)  # (C, H, W) -> (H, W, C)
+
+            axs[ii + 2].imshow(train_img)
+            axs[ii + 2].axis("off")
+            axs[ii + 2].set_title(f"Label: {train_label}, GT: {gt}")
+
+        plt.tight_layout()
+        plt.show()
+
+def visualize_train_to_val(scores, ds_val, ds_train, descending=True):
+    train_indices = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29]
+    
+    for i in train_indices:
+        fig, axs = plt.subplots(ncols=7, figsize=(15, 3))
+        fig.suptitle("Top Influential Training Images")
+
+        # Get query image and label
+        train_img,_, train_label, gt = ds_train[i]
+        train_img = train_img.permute(1, 2, 0)  # (C, H, W) -> (H, W, C)
+
+        axs[0].imshow(train_img)
+        axs[0].axis("off")
+        axs[0].set_title(f"Query\nLabel: {train_label}, GT: {gt}")
+
+        axs[1].axis("off")  # Spacer column
+
+        # Get top 5 influential validation sample indices
+        influence_matrix = scores['all_modules']
+        influence_matrix_t = influence_matrix.transpose(0, 1)
+        top_idxs = influence_matrix_t[i].argsort(descending=descending)[:5]
+
+        for ii, idx in enumerate(top_idxs):
+            val_img, val_label = ds_val[idx]
+            val_img = val_img.permute(1, 2, 0)  # (C, H, W) -> (H, W, C)
+
+            axs[ii + 2].imshow(val_img)
+            axs[ii + 2].axis("off")
+            axs[ii + 2].set_title(f"Label: {val_label},")
+
+        plt.tight_layout()
+        plt.show()
+
+def updated_ulb_dataset(unlabeled_dataset, val_dataset, model, args, epoch, unlabeled_indices):
+    # Delete all files in the folder
+    if os.path.exists(f"./influence_results/cifar10-ekfac-influence-verify-{args.seed}"):
+        shutil.rmtree(f"./influence_results/cifar10-ekfac-influence-verify-{args.seed}")
     model = prepare_model(model=model, task=SSLTask())
-    analyzer = Analyzer(analysis_name="cifar10-ekfac-influence-verify", model=model, task=SSLTask())
+    analyzer = Analyzer(analysis_name=f"cifar10-ekfac-influence-verify-{args.seed}", model=model, task=SSLTask())
     analyzer.fit_all_factors(factors_name=f"SSL_factor_{epoch}", dataset=unlabeled_dataset, factor_args=args.factor_args)
     analyzer.compute_pairwise_scores(
         scores_name=f"SSL_score_{epoch}",
@@ -414,28 +486,56 @@ def updated_ulb_dataset(unlabeled_dataset, val_dataset, model, args, epoch):
     # Sum each row to get the influence score of each sample
     influence_scores = scores['all_modules'].sum(dim=0)
     assert len(influence_scores) == len(unlabeled_dataset), "Influence scores length mismatch."
-    positive_indices = (influence_scores > 0).nonzero(as_tuple=True)[0]  # Get positive indices
+    N = len(influence_scores)
+    group_size = args.num_classes
+    # Number of top indices to select per group
+    top_k = 1
 
-    # Check if the filtered dataset is empty
-    if len(positive_indices) == 0:
-        raise ValueError("No samples with positive influence scores found.")
+    # Sanity check
+    assert N % group_size == 0, "Total samples should be divisible by group size."
+
+    top_indices_per_group = []
+
+    for i in range(0, N, group_size):
+        group = influence_scores[i:i + group_size]
+        top = torch.topk(group, k=top_k)
+        # Store the original indices (not just within-group)
+        top_indices_per_group.extend((top.indices + i).tolist())
+
+    # if epoch < args.warmup*3:
+    #     filtered_indices = top_indices_per_group
+    # else:
+
+
+    # influence_threshold = 50000
+    
+    # while True:
+    #     filtered_indices = [idx for idx in top_indices_per_group if influence_scores[idx] < influence_threshold]
+    #     if filtered_indices:
+    #         break
+    #     influence_threshold += 10000
+
+    # print(f"Influence threshold: {influence_threshold}")
+        # increase the threshold
+    # positive_indices = (influence_scores > 0).nonzero(as_tuple=True)[0]  # Get positive indices
 
     # After getting the score, create a txt file store current index, salutary label, ground truth label, and influence score
-    with open(f"./influence_scores_seed4/influence_scores_{epoch}.txt", "w") as f:
+    
+    with open(f"./influence_scores_seed{args.seed}/influence_scores_{epoch}.txt", "w") as f:
         correct_label = 0
-        for idx in positive_indices:
-            img_w, img_s, label, gt = unlabeled_dataset[idx]
+        for idx in top_indices_per_group:
+            _, label, gt = unlabeled_dataset[idx]
             if label == gt:
                 correct_label += 1
-            f.write(f"Index: {idx}, Salutary Label: {label}, Ground Truth: {gt}, Influence Score: {influence_scores[idx]}\n")
-        f.write(f"Correct labels: {correct_label}/{len(positive_indices)}\n")
-    # Filter out the samples with negative influence scores
-    unlabeled_dataset = torch.utils.data.Subset(unlabeled_dataset, positive_indices.tolist())
+            f.write(f"Index: {unlabeled_indices[idx // args.num_classes]}, Salutary Label: {label}, Ground Truth: {gt}, Influence Score: {influence_scores[idx]}\n")
+        f.write(f"Correct labels: {correct_label}/{len(top_indices_per_group)}\n")
+    
+    # visualize(scores, val_dataset, unlabeled_dataset, descending=True)
 
-    return unlabeled_dataset
+    return torch.tensor(top_indices_per_group)
 
 def train(args, labeled_trainloader, unlabeled_dataset, val_dataset, test_loader,
-          model, optimizer, ema_model, scheduler, log, warmup: bool):
+          model, optimizer, ema_model, scheduler, log, warmup: bool, unlabeled_labeled_indices):
     if args.amp:
         from apex import amp
     global best_acc
@@ -446,7 +546,6 @@ def train(args, labeled_trainloader, unlabeled_dataset, val_dataset, test_loader
         labeled_epoch = 0
         unlabeled_epoch = 0
         labeled_trainloader.sampler.set_epoch(labeled_epoch)
-        unlabeled_trainloader.sampler.set_epoch(unlabeled_epoch)
 
     labeled_iter = iter(labeled_trainloader)
     # unlabeled_iter = iter(unlabeled_trainloader)
@@ -459,6 +558,7 @@ def train(args, labeled_trainloader, unlabeled_dataset, val_dataset, test_loader
     model.train()
     # if ulb_sampler is not None:
     #     ulb_sampler.reset_epoch(args.start_epoch)
+
     for epoch in range(args.start_epoch, epochs):
         epoch_start = time.time()
         batch_time = AverageMeter()
@@ -468,21 +568,89 @@ def train(args, labeled_trainloader, unlabeled_dataset, val_dataset, test_loader
         losses_u = AverageMeter()
         
         if not warmup:
-            # Deep copy of the model for influence computation
-            model_copy = copy.deepcopy(model) 
-            # Update the unlabeled dataset filtering out the samples with negative influence scores
-            unlabeled_dataset = updated_ulb_dataset(unlabeled_dataset, val_dataset, model_copy, args, epoch)
-            unlabeled_trainloader = DataLoader(unlabeled_dataset, batch_size=args.batch_size*args.mu, shuffle=True, num_workers=args.num_workers, drop_last=True)
-            unlabeled_iter = iter(unlabeled_trainloader)
+            # Calculate number of unlabeled data size gonna use
+            total = 0
+            if args.CBS:
+                for t in range(epoch * args.train_iteration, (epoch + 1) * args.train_iteration):
+                    total += CBS(args.batch_size, args.alpha, t, args.total_steps)
+                print(f"Total unlabeled data size: {total}")
+                total = len(unlabeled_dataset) if total > len(unlabeled_dataset) else total
+            else:
+                total = 512
+            # Create a subset of the unlabeled dataset randomly
+            indices = torch.randperm(len(unlabeled_dataset))[:total]
+            ulb_dataset = unlabeled_dataset.select_subset(indices)
 
-        # if ulb_sampler is not None:
-        #     ulb_sampler.reset_epoch(epoch)
+            # Expand the dataset while keeping track of the original indices
+            expanded_img_w = []
+            expanded_labels = []
+            ground_truths = []
+
+            for (img_w, _), _, gt, _ in ulb_dataset:
+                for label in range(args.num_classes):
+                    expanded_img_w.append(img_w)
+                    expanded_labels.append(label)
+                    ground_truths.append(gt)
+
+            expanded_img_w = torch.stack(expanded_img_w)
+            expanded_labels = torch.tensor(expanded_labels)
+            ground_truths = torch.tensor(ground_truths)
+
+            # Create the expanded dataset with original indices
+            expanded_dataset = TensorDataset(expanded_img_w, expanded_labels, ground_truths)
+
+            # Deep copy of the model for influence computation
+            model_copy = copy.deepcopy(model)
+
+            # Get the indices with positive influence
+            positive_indices = updated_ulb_dataset(expanded_dataset, val_dataset, model_copy, args, epoch, indices)
+            
+            selected_indices = indices[positive_indices // args.num_classes]
+
+            # if len(positive_indices) == 2048:
+            #     # Warmup phase: use the top-k indices
+            #     ulb_dataset = unlabeled_dataset.select_subset(selected_indices)
+            #     ulb_dataset.targets = expanded_labels[positive_indices]
+            # else:
+            unlabeled_labeled_indices.extend(selected_indices.tolist())
+
+            # Remove duplicate element in the list
+            unlabeled_labeled_indices = list(set(unlabeled_labeled_indices))
+            
+            # Update the targets of the unlabeled dataset
+            if isinstance(unlabeled_dataset.targets, list):
+                unlabeled_dataset.targets = torch.tensor(unlabeled_dataset.targets)
+
+            unlabeled_dataset.targets[selected_indices] = expanded_labels[positive_indices]
+            
+            # Save the ulb_dataset to prevent unexpected interruption, save unlabeled_labeled_indices and labels
+            # Save indices and labels
+            with open(f"{args.out}/unlabeled_labeled_indices.txt", "w") as f:
+                for idx in unlabeled_labeled_indices:
+                    f.write(f"{idx}, {unlabeled_dataset.targets[idx]}, {unlabeled_dataset.gt[idx]}\n")
+                
+                # Calculate the accuracy and write to the file
+                correct = (unlabeled_dataset.targets[unlabeled_labeled_indices] == unlabeled_dataset.gt[unlabeled_labeled_indices]).sum().item()
+                f.write(f"Correct labels: {correct}/{len(unlabeled_labeled_indices)}\n")
+
+            # Get the dataset with the targets not -1
+            ulb_dataset = unlabeled_dataset.select_subset(unlabeled_labeled_indices)
+
+            print(f"Unlabeled dataset size: {len(ulb_dataset)}")
+            # unlabeled_ratio = len(ulb_dataset) / len(unlabeled_dataset)
+
+            expand_factor = args.batch_size * args.mu * args.train_iteration // len(ulb_dataset)
+            ulb_dataset.expand_data(expand_factor)
+
+            ulb_dataloader = DataLoader(ulb_dataset, batch_size=args.batch_size*args.mu, shuffle=True, num_workers=args.num_workers, drop_last=True)
+            unlabeled_iter = iter(ulb_dataloader)
+            
         if not args.no_progress:
             p_bar = tqdm(range(args.train_iteration),
                          disable=args.local_rank not in [-1, 0])
         for batch_idx in range(args.train_iteration):
             try:
-                inputs_x, targets_x, _ = next(labeled_iter)
+                inputs_x, targets_x,_, _ = next(labeled_iter)
                 # error occurs ↓
                 # inputs_x, targets_x = next(labeled_iter)
             except:
@@ -490,21 +658,22 @@ def train(args, labeled_trainloader, unlabeled_dataset, val_dataset, test_loader
                     labeled_epoch += 1
                     labeled_trainloader.sampler.set_epoch(labeled_epoch)
                 labeled_iter = iter(labeled_trainloader)
-                inputs_x, targets_x, _ = next(labeled_iter)
+                inputs_x, targets_x, _, _ = next(labeled_iter)
                 # error occurs ↓
                 # inputs_x, targets_x = next(labeled_iter)
             if not warmup:
                 try:
-                    inputs_u_w, inputs_u_s, targets_u, _ = next(unlabeled_iter)
-                    # error occurs ↓
-                    # (inputs_u_w, inputs_u_s), _ = next(unlabeled_iter)
-                except:
-                    if args.world_size > 1:
-                        print("Enter set epoch")
-                        unlabeled_epoch += 1
-                        unlabeled_trainloader.sampler.set_epoch(unlabeled_epoch)
-                    unlabeled_iter = iter(unlabeled_trainloader)
-                    inputs_u_w, inputs_u_s, targets_u, _ = next(unlabeled_iter)
+                    (inputs_u_w, inputs_u_s), targets_u, gt, _ = next(unlabeled_iter)
+                    # print("Target:", targets_u)
+                    # print("Ground Truth:", gt)
+                    # # calculate the accuracy of the psudo label by comparing with gt
+                    # print("Accuracy:", (targets_u == gt).sum().item() / targets_u.shape[0])
+
+                    # targets_u = torch.tensor([index_to_target[idx.item()] for idx in indices]).to(args.device)
+                except StopIteration:
+                    unlabeled_iter = iter(ulb_dataloader)
+                    (inputs_u_w, inputs_u_s), targets_u, gt, _ = next(unlabeled_iter)
+                    # targets_u = torch.tensor([index_to_target[idx.item()] for idx in indices]).to(args.device)
             
             data_time.update(time.time() - end)
             batch_size = inputs_x.shape[0]
@@ -527,6 +696,8 @@ def train(args, labeled_trainloader, unlabeled_dataset, val_dataset, test_loader
                 logits_u_w, logits_u_s = logits[batch_size:].chunk(2)
                 del logits
 
+                # ulb_batch_size = inputs_u_w.shape[0]
+
                 Lx = F.cross_entropy(logits_x, targets_x, reduction='mean')
 
                 Lu_w = F.cross_entropy(logits_u_w, targets_u,
@@ -535,7 +706,7 @@ def train(args, labeled_trainloader, unlabeled_dataset, val_dataset, test_loader
                                     reduction='mean')
                 Lu = Lu_w + Lu_s
 
-                loss = Lx + args.lambda_u * Lu
+                loss = Lx + args.lambda_u * linear_rampup(epoch, args.epochs) * Lu
 
             if args.amp:
                 with amp.scale_loss(loss, optimizer) as scaled_loss:
@@ -579,15 +750,19 @@ def train(args, labeled_trainloader, unlabeled_dataset, val_dataset, test_loader
             test_model = model
 
         if args.local_rank in [-1, 0]:
+            val_loader = DataLoader(val_dataset, batch_size=args.batch_size, shuffle=False, num_workers=0)
+            val_loss, val_acc = test(args, val_loader, test_model, epoch)
             test_loss, test_acc = test(args, test_loader, test_model, epoch)
 
             args.writer.add_scalar('train/1.train_loss', losses.avg, epoch)
             args.writer.add_scalar('train/2.train_loss_x', losses_x.avg, epoch)
             args.writer.add_scalar('train/3.train_loss_u', losses_u.avg, epoch)
+            args.writer.add_scalar('train/4.val_acc', val_acc, epoch)
+            args.writer.add_scalar('train/5.val_loss', val_loss, epoch)
             args.writer.add_scalar('test/1.test_acc', test_acc, epoch)
             args.writer.add_scalar('test/2.test_loss', test_loss, epoch)
 
-            log.append([losses.avg, losses_x.avg, losses_u.avg, test_loss, test_acc, epoch_time.avg])
+            log.append([losses.avg, losses_x.avg, losses_u.avg, val_loss, val_acc, test_loss, test_acc, epoch_time.avg])
 
             is_best = test_acc > best_acc
             best_acc = max(test_acc, best_acc)

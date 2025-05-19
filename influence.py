@@ -514,6 +514,8 @@ def train(args, labeled_trainloader, unlabeled_dataset, val_dataset, test_loader
                 logits_u_w, logits_u_s = logits[batch_size:].chunk(2)
                 del logits
 
+                ulb_batch_size = inputs_u_w.shape[0]
+
                 Lx = F.cross_entropy(logits_x, targets_x, reduction='mean')
 
                 Lu_w = F.cross_entropy(logits_u_w, targets_u,

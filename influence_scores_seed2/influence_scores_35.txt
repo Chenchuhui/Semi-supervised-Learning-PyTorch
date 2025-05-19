@@ -1,0 +1,17 @@
+Index: 478, Salutary Label: 8, Ground Truth: 8, Influence Score: 1753416.125
+Index: 1168, Salutary Label: 8, Ground Truth: 8, Influence Score: 1168137.5
+Index: 2385, Salutary Label: 5, Ground Truth: 5, Influence Score: 1431350.25
+Index: 3397, Salutary Label: 7, Ground Truth: 4, Influence Score: 1122114.0
+Index: 3627, Salutary Label: 7, Ground Truth: 4, Influence Score: 1564565.25
+Index: 3848, Salutary Label: 8, Ground Truth: 8, Influence Score: 324118.78125
+Index: 3868, Salutary Label: 8, Ground Truth: 8, Influence Score: 625871.6875
+Index: 3947, Salutary Label: 7, Ground Truth: 7, Influence Score: 520995.5625
+Index: 9888, Salutary Label: 8, Ground Truth: 8, Influence Score: 1029901.5625
+Index: 11798, Salutary Label: 8, Ground Truth: 2, Influence Score: 1608530.0
+Index: 13561, Salutary Label: 1, Ground Truth: 1, Influence Score: 659551.0625
+Index: 14317, Salutary Label: 7, Ground Truth: 7, Influence Score: 529176.125
+Index: 14887, Salutary Label: 7, Ground Truth: 7, Influence Score: 860959.75
+Index: 15850, Salutary Label: 0, Ground Truth: 2, Influence Score: 317357.71875
+Index: 17394, Salutary Label: 4, Ground Truth: 4, Influence Score: 1196603.375
+Index: 19184, Salutary Label: 4, Ground Truth: 4, Influence Score: 88003.0546875
+Correct labels: 12/16

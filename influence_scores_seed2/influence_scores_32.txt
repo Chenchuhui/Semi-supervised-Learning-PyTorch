@@ -1,0 +1,7 @@
+Index: 3524, Salutary Label: 4, Ground Truth: 2, Influence Score: 22560.263671875
+Index: 11384, Salutary Label: 4, Ground Truth: 4, Influence Score: 582953.5
+Index: 11754, Salutary Label: 4, Ground Truth: 4, Influence Score: 737584.0
+Index: 11897, Salutary Label: 7, Ground Truth: 2, Influence Score: 562749.1875
+Index: 11967, Salutary Label: 7, Ground Truth: 6, Influence Score: 1432829.25
+Index: 13751, Salutary Label: 1, Ground Truth: 6, Influence Score: 1406160.5
+Correct labels: 2/6

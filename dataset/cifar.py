@@ -57,7 +57,7 @@ def get_cifar10(args, root):
             transform=UnlabeledTransform(mean=cifar10_mean, std=cifar10_std, crop_size=args.img_size, crop_ratio=args.crop_ratio))
 
     val_dataset = CIFAR10SSL(
-            root, val_idxs, train=True,
+            root, val_idxs, train=True, val=True,
             transform=transform_val)
     test_dataset = datasets.CIFAR10(
         root, train=False, transform=transform_val, download=False)
@@ -94,7 +94,7 @@ def get_cifar100(args, root):
         transform=UnlabeledTransform(mean=cifar100_mean, std=cifar100_std, crop_size=args.img_size, crop_ratio=args.crop_ratio))
     
     val_dataset = CIFAR100SSL(
-        root, val_unlabeled_idxs, train=True,
+        root, val_unlabeled_idxs, train=True, val=True,
         transform=transform_val)
     
     test_dataset = datasets.CIFAR100(
@@ -161,15 +161,19 @@ class UnlabeledTransform(object):
 
 
 class CIFAR10SSL(datasets.CIFAR10):
-    def __init__(self, root, indexs, train=True,
+    def __init__(self, root, indexs=None, train=True, val=False,
                  transform=None, target_transform=None,
                  download=False):
         super().__init__(root, train=train,
                          transform=transform,
                          target_transform=target_transform,
                          download=download)
+        self.root = root
+        self.indexs = indexs
+        self.val = val
         if indexs is not None:
             self.data = self.data[indexs]
+            self.gt = np.array(self.targets)[indexs]
             self.targets = np.array(self.targets)[indexs]
 
     def __getitem__(self, index):
@@ -181,8 +185,42 @@ class CIFAR10SSL(datasets.CIFAR10):
 
         if self.target_transform is not None:
             target = self.target_transform(target)
+        if self.val:
+            return img, target
+        gt = self.gt[index]
+        return img, target, gt, index
 
-        return img, target, index
+    def select_subset(self, indices):
+        """
+        Return a new CIFAR10SSL dataset with only selected indices.
+        """
+        subset_dataset = CIFAR10SSL(
+            root=self.root,
+            indexs=None,
+            train=self.train,
+            val=self.val,
+            transform=self.transform,
+            target_transform=self.target_transform,
+            download=False
+        )
+
+        subset_dataset.data = self.data[indices]
+        subset_dataset.gt = np.array(self.gt)[indices]
+        subset_dataset.targets = np.array(self.targets)[indices]
+
+        return subset_dataset
+
+    def expand_data(self, factor):
+        """
+        Expand the current dataset in-place by repeating data and targets.
+        """
+        if factor <= 1:
+            return  # Nothing to do
+
+        self.data = np.tile(self.data, (factor, 1, 1, 1))
+        self.gt = np.tile(self.gt, factor)
+        self.targets = np.tile(self.targets, factor)
+
 
 class CIFAR10SSLPreaug(datasets.CIFAR10):
     def __init__(self, root, indexs, is_ulb, batch_size, iteration, 
@@ -237,13 +275,14 @@ class CIFAR10SSLPreaug(datasets.CIFAR10):
             return (w_img, s_img), target
 
 class CIFAR100SSL(datasets.CIFAR100):
-    def __init__(self, root, indexs, train=True,
+    def __init__(self, root, indexs, train=True, val=False,
                  transform=None, target_transform=None,
                  download=False):
         super().__init__(root, train=train,
                          transform=transform,
                          target_transform=target_transform,
                          download=download)
+        self.val = val
         if indexs is not None:
             self.data = self.data[indexs]
             self.targets = np.array(self.targets)[indexs]
@@ -257,6 +296,9 @@ class CIFAR100SSL(datasets.CIFAR100):
 
         if self.target_transform is not None:
             target = self.target_transform(target)
+        
+        if self.val:
+            return img, target
 
         return img, target, index
 
